@@ -208,21 +208,13 @@ function buildAxolotl(v){
     else { foot=part(ell(0.16,0.09,0.19), v.body); foot.position.set(0,-0.34,0.05); hip.add(foot); }
     rig.legs[side<0?'L':'R'] = {hip, foot};
   }
-  // rabo (corrente de segmentos — cada um é um pivô)
+  // rabo: corrente de juntas (pivôs p/ animar) + uma malha lisa única, recalculada a cada pose
   const tailBase=new THREE.Group(); tailBase.position.set(0.2,0.4,-0.18); tailBase.rotation.y=0.45; torso.add(tailBase);
   const radii=[0.16,0.15,0.138,0.125,0.11,0.095,0.08,0.066,0.052];
   const curl =[-0.12,0.08,0.22,0.36,0.46,0.52,0.56,0.56,0.5];
   rig.tail=[]; let parent=tailBase;
-  radii.forEach((r,i)=>{
-    const seg=new THREE.Group(); if(i) seg.position.x=0.11; seg.rotation.z=curl[i]; parent.add(seg);
-    const rn=radii[i+1] ?? r*0.55;
-    // barbatana (lado de dentro da curva) — adicionada antes p/ ficar atrás do contorno do rabo
-    if(i>0){ const fin=part(ell(0.085,r*0.5,0.035), v.gill, {w:0.018}); fin.position.set(0.055,r*0.78,0); seg.add(fin); }
-    seg.add(part(new THREE.SphereGeometry(r,24,16).scale(1,1,0.7), v.body));
-    seg.add(part(new THREE.CylinderGeometry(rn,r,0.11,24,1,true).rotateZ(-Math.PI/2).translate(0.055,0,0).scale(1,1,0.7), v.body));
-    if(i===radii.length-1){ const tip=part(new THREE.SphereGeometry(rn,20,14).scale(1.6,1,0.7), v.body); tip.position.x=0.11; seg.add(tip); }
-    rig.tail.push(seg); parent=seg;
-  });
+  radii.forEach((r,i)=>{ const seg=new THREE.Group(); if(i) seg.position.x=0.11; seg.rotation.z=curl[i]; parent.add(seg); rig.tail.push(seg); parent=seg; });
+  makeTail(rig,tailBase,radii,v);
 
   // sombra no chão
   root.add(shadowMesh());
@@ -234,11 +226,48 @@ function buildAxolotl(v){
     const b=part(caps(0.017,0.08).rotateZ(Math.PI/2),INK,{outline:false,flat:true}); b.rotation.z=-0.4*side; g.add(b); g.visible=false; rig.face.add(g); return g; });
   rig.tears = [-1,1].map(side=>{ const g=new THREE.Group(); onHead(g,0.36*side,-0.06,0.02);
     const d=part(ell(0.032,0.045,0.02),'#8fd8ff',{outline:true,w:0.012}); g.add(d); g.visible=false; rig.face.add(g); return g; });
+  rig.frown=(()=>{ const g=new THREE.Group(); onHead(g,0,-0.2,0.006);
+    g.add(part(new THREE.TorusGeometry(0.06,0.017,10,24,Math.PI),INK,{outline:false,flat:true}));
+    [-1,1].forEach(sd=>{ const c=part(ell(0.017,0.017,0.017),INK,{outline:false,flat:true}); c.position.x=0.06*sd; g.add(c); });
+    g.visible=false; rig.face.add(g); return g; })();
   rig.root.traverse(o=>{ o.userData.rest=[o.position.clone(),o.rotation.clone(),o.scale.clone(),o.visible]; });
   rig.all=[]; rig.root.traverse(o=>rig.all.push(o));
   return rig;
 }
 
+function makeTail(rig,base,radii,v){
+  const M=22, rr=[...radii, radii[radii.length-1]*0.66, 0.014], N=rr.length, SEG=0.11;
+  const pos=new Float32Array((N*M+1)*3), col=new Float32Array((N*M+1)*3), idx=[];
+  const cb=new THREE.Color(v.body), cg=new THREE.Color(v.gill);
+  for(let i=0;i<N;i++) for(let k=0;k<M;k++){
+    const c=(Math.cos(k/M*Math.PI*2)>0.86 && i>0)?cg:cb; col.set([c.r,c.g,c.b],(i*M+k)*3);
+    if(i<N-1){ const a=i*M+k, b=i*M+(k+1)%M, c2=(i+1)*M+k, d=(i+1)*M+(k+1)%M; idx.push(a,b,c2, b,d,c2); }
+  }
+  const tip=N*M; col.set([cb.r,cb.g,cb.b],tip*3);
+  for(let k=0;k<M;k++) idx.push((N-1)*M+k,(N-1)*M+(k+1)%M,tip);
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(pos,3)); geo.setAttribute('color',new THREE.BufferAttribute(col,3)); geo.setIndex(idx);
+  const mesh=new THREE.Mesh(geo,new THREE.MeshToonMaterial({color:0xffffff,vertexColors:true,gradientMap:gradTex}));
+  const hull=new THREE.Mesh(geo,outlineMat());
+  mesh.frustumCulled=hull.frustumCulled=false; base.add(mesh,hull);
+  const acc=new THREE.Matrix4(), P=[], Q=[], rq=new THREE.Quaternion(), ax=new THREE.Vector3(), up=new THREE.Vector3(), sd=new THREE.Vector3();
+  for(let i=0;i<N;i++){ P.push(new THREE.Vector3()); Q.push(new THREE.Quaternion()); }
+  rig.updateTail=()=>{
+    acc.identity(); const n=rig.tail.length;
+    for(let i=0;i<n;i++){ const seg=rig.tail[i]; seg.updateMatrix(); acc.multiply(seg.matrix); P[i].setFromMatrixPosition(acc); Q[i].setFromRotationMatrix(acc); }
+    ax.set(1,0,0).applyQuaternion(Q[n-1]);
+    for(let i=n;i<N;i++){ P[i].copy(P[i-1]).addScaledVector(ax,i===n?SEG:SEG*0.75); Q[i].copy(Q[n-1]); }
+    for(let i=0;i<N;i++){
+      if(i>0&&i<n) rq.copy(Q[i-1]).slerp(Q[i],0.5); else rq.copy(Q[i]);
+      up.set(0,1,0).applyQuaternion(rq); sd.set(0,0,1).applyQuaternion(rq);
+      for(let k=0;k<M;k++){ const a=k/M*Math.PI*2, cu=Math.cos(a)*rr[i], cs=Math.sin(a)*rr[i]*0.72, o=(i*M+k)*3;
+        pos[o]=P[i].x+up.x*cu+sd.x*cs; pos[o+1]=P[i].y+up.y*cu+sd.y*cs; pos[o+2]=P[i].z+up.z*cu+sd.z*cs; }
+    }
+    pos[tip*3]=P[N-1].x+ax.x*0.03; pos[tip*3+1]=P[N-1].y+ax.y*0.03; pos[tip*3+2]=P[N-1].z+ax.z*0.03;
+    geo.attributes.position.needsUpdate=true; geo.computeVertexNormals();
+  };
+  rig.updateTail();
+}
 let _shadowTex;
 function shadowMesh(){
   if(!_shadowTex){ const c=document.createElement('canvas'); c.width=c.height=128; const x=c.getContext('2d');
@@ -405,201 +434,208 @@ function mk(w){
 }
 const SIDES = [['L',-1],['R',1]];
 
+// braço em pose ABSOLUTA. z: abertura lateral (0 = colado no corpo, 1.57 = horizontal, 2.3 = em "V" pra cima —
+// mais que isso a mão entra na cabeça). x: pra frente (−) / pra trás (+). e: cotovelo abrindo. ex: cotovelo dobrando pra frente (−).
+const ARM0={x:-0.12,z:0.7,e:-0.25};
+function arm(P,r,k,z,x=ARM0.x,e=ARM0.e,ex=0){
+  const sd=k==='L'?-1:1, a=r.arms[k];
+  P.r(a.shoulder,x-ARM0.x,0,sd*(z-ARM0.z)); P.r(a.elbow,ex,0,sd*(e-ARM0.e));
+}
 function breathe(P,r,t,a=1){
   P.s(r.body, 1-0.012*a*S(t,2.2), 1+0.02*a*S(t,2.2), 1-0.012*a*S(t,2.2));
   r.gills.L.forEach((g,i)=>P.r(g,0,0,-0.09*a*S(t,2.4,i*0.8)));
   r.gills.R.forEach((g,i)=>P.r(g,0,0, 0.09*a*S(t,2.4,i*0.8)));
   r.tail.forEach((s,i)=>P.r(s,0,0.1*a*S(t,1.7,-i*0.45),0.03*a*S(t,1.7,-i*0.45)));
-  for (const [k,sd] of SIDES) P.r(r.arms[k].shoulder,0,0,sd*0.04*a*S(t,2.2));
 }
 function flapGills(P,r,t,amp,f=9){
   r.gills.L.forEach((g,i)=>P.r(g,0,0,-amp*S(t,f,i*0.9)));
   r.gills.R.forEach((g,i)=>P.r(g,0,0, amp*S(t,f,i*0.9)));
 }
-function armsUp(P,r,a=2.3,wig=0,t=0){
-  for (const [k,sd] of SIDES){ P.r(r.arms[k].shoulder,0,0,sd*(a+wig*S(t,10,sd))); P.r(r.arms[k].elbow,0,0,sd*0.25); }
-}
-function squatPose(P,r,d,{lean=0.22,arms=true}={}){
-  const a = Math.acos(Math.min(1,(0.42-0.17*d)/0.42));
-  P.p(r.torso,0,-0.17*d,0);
+function wagTail(P,r,t,amp,f){ r.tail.forEach((sg,i)=>P.r(sg,0,amp*S(t,f,-i*0.5),0)); }
+// agachamento: quadril desce, pés ficam no chão, joelhos pra frente
+function squatPose(P,r,d,{lean=0.2,arms=true}={}){
+  const drop=0.2*d, a=Math.acos(Math.min(1,(0.42-drop)/0.42));
+  P.p(r.torso,0,-drop,-0.06*d);
   P.r(r.torso,lean*d,0,0);
-  for (const [k] of SIDES){ P.r(r.legs[k].hip,-a-lean*d,0,0); P.r(r.legs[k].foot,a,0,0); }
-  if (arms) for (const [k,sd] of SIDES){ P.r(r.arms[k].shoulder,-1.35*d,0,-sd*0.5*d); }
-  P.r(r.neck,-lean*d*0.8,0,0);
+  for (const [k,sd] of SIDES){ P.r(r.legs[k].hip,-a-lean*d,0,sd*0.12*d); P.r(r.legs[k].foot,a,0,0); }
+  if (arms) for (const [k] of SIDES) arm(P,r,k,0.7-0.45*d,ARM0.x-1.3*d);
+  P.r(r.neck,-lean*d*0.9,0,0);
 }
 
 export const ANIMS = {
-  idle(P,r,t){ breathe(P,r,t); P.r(r.neck,0.03*S(t,1.3),0.05*S(t,0.7),0.04*S(t,0.9)); },
+  idle(P,r,t){ breathe(P,r,t); P.r(r.neck,0.03*S(t,1.3),0.05*S(t,0.7),0.04*S(t,0.9)); for (const [k] of SIDES) arm(P,r,k,0.7+0.04*S(t,2.2)); },
   happy(P,r,t){
     breathe(P,r,t,1.2);
-    const h = Math.max(0,S(t,5.2)); const hop = (Math.floor(t/2.6)%2===0 && (t%2.6)<1.2) ? h : 0;
-    P.p(r.body,0,0.12*hop,0); P.s(r.body,1+0.04*(1-hop)*Math.abs(S(t,5.2)),1,1);
+    const u=t%2.6, hop = u<1.2 ? Math.abs(Math.sin(u/1.2*Math.PI*2)) : 0;
+    P.p(r.body,0,0.12*hop,0); P.s(r.body,1+0.03*(1-hop)*(u<1.2?1:0),1-0.02*(1-hop)*(u<1.2?1:0),1);
     P.r(r.neck,0.04*S(t,2.6),0.08*S(t,1.3),0.08*S(t,2.6));
-    for (const [k,sd] of SIDES) P.r(r.arms[k].shoulder,0,0,sd*(0.25+0.12*S(t,5.2)));
+    for (const [k] of SIDES) arm(P,r,k,0.95+0.3*hop);
   },
   talk(P,r,t){
     breathe(P,r,t);
     P.r(r.neck,0.05*S(t,6),0.06*S(t,1.6),0.05*S(t,2.1));
     P.s(r.mouth,1,1+0.55*Math.abs(S(t,11)),1);
-    P.r(r.arms.L.shoulder,-0.55-0.15*S(t,3),0,-0.35-0.15*S(t,3)); P.r(r.arms.L.elbow,-0.9,0,0);
+    arm(P,r,'R',0.95+0.12*S(t,3),-0.75-0.2*S(t,3),ARM0.e,-0.9); arm(P,r,'L',0.7);
   },
   wave(P,r,t){
     breathe(P,r,t);
-    P.r(r.arms.R.shoulder,-0.25,0,2.15); P.r(r.arms.R.elbow,0,0,0.25+0.55*S(t,9));
-    P.r(r.neck,0,0.1,-0.1+0.03*S(t,4.5)); flapGills(P,r,t,0.06,6);
-  },
-  point(P,r,t){
-    breathe(P,r,t);
-    P.r(r.arms.R.shoulder,-1.05,0,0.9+0.06*S(t,5)); P.r(r.arms.R.elbow,0,0,0.2);
-    P.r(r.neck,0.05,0.25,-0.06);
+    arm(P,r,'R',1.95+0.22*S(t,8),0.35,0.55+0.4*S(t,8)); arm(P,r,'L',0.75);
+    P.r(r.neck,0,0.08,-0.1+0.03*S(t,4)); flapGills(P,r,t,0.06,6);
   },
   cheer(P,r,t){
     const s = Math.abs(S(t,4.6));
-    P.p(r.body,0,0.32*s,0); P.s(r.body,1.06-0.08*s,0.9+0.14*s,1.06-0.08*s);
-    armsUp(P,r,2.25,0.25,t); flapGills(P,r,t,0.22,10);
-    P.r(r.neck,-0.12,0,0.06*S(t,4.6));
-    r.tail.forEach((sg,i)=>P.r(sg,0,0.25*S(t,9,-i*0.5),0));
-    for (const [k,sd] of SIDES) P.r(r.legs[k].hip,0,0,sd*0.12*s);
+    P.p(r.body,0,0.3*s,0); P.s(r.body,1.05-0.07*s,0.92+0.12*s,1.05-0.07*s);
+    for (const [k,sd] of SIDES) arm(P,r,k,2.2+0.12*S(t,9.2,sd),0.3,0.1);
+    flapGills(P,r,t,0.22,10); P.r(r.neck,-0.12,0,0.06*S(t,4.6)); wagTail(P,r,t,0.25,9);
+    for (const [k,sd] of SIDES) P.r(r.legs[k].hip,0,0,sd*0.14*s);
   },
   dance(P,r,t){
     breathe(P,r,t);
-    P.r(r.body,0,0.15*S(t,3),0.1*S(t,6)); P.p(r.body,0,0.06*Math.abs(S(t,6)),0);
-    P.r(r.arms.L.shoulder,0,0,-(1.4+0.9*Math.max(0,S(t,6)))); P.r(r.arms.R.shoulder,0,0,1.4+0.9*Math.max(0,-S(t,6)));
-    P.r(r.neck,0.08*S(t,6),0,-0.1*S(t,6)); flapGills(P,r,t,0.15,6);
-    for (const [k,sd] of SIDES) P.r(r.legs[k].hip,-0.25*Math.max(0,sd*S(t,6)),0,0);
+    const k=S(t,6);
+    P.r(r.body,0,0.15*S(t,3),0.09*k); P.p(r.body,0,0.06*Math.abs(k),0);
+    arm(P,r,'L',1.35+0.9*Math.max(0,k),0.25,0.1); arm(P,r,'R',1.35+0.9*Math.max(0,-k),0.25,0.1);
+    P.r(r.neck,0.06*k,0,-0.1*k); flapGills(P,r,t,0.15,6); wagTail(P,r,t,0.2,6);
+    P.r(r.legs.L.hip,-0.3*Math.max(0,-k),0,0); P.r(r.legs.R.hip,-0.3*Math.max(0,k),0,0);
   },
   sad(P,r,t){
     breathe(P,r,t,0.6);
     P.r(r.neck,0.3,0,0.06*S(t,0.6)); P.s(r.body,1.02,0.96,1.02);
-    for (const [k,sd] of SIDES) P.r(r.arms[k].shoulder,0.15,0,-sd*0.32);
+    for (const [k] of SIDES) arm(P,r,k,0.4,0.05);
     r.gills.L.forEach((g,i)=>P.r(g,0,0, 0.45+0.03*S(t,1.2,i)));
     r.gills.R.forEach((g,i)=>P.r(g,0,0,-0.45-0.03*S(t,1.2,i)));
     r.tail.forEach(s=>P.r(s,0,0,-0.07));
   },
   sleep(P,r,t){
     breathe(P,r,t,1.4); P.r(r.neck,0.22,0,0.18); P.s(r.body,1.02,0.97,1.02);
-    for (const [k,sd] of SIDES) P.r(r.arms[k].shoulder,0,0,-sd*0.25);
+    for (const [k] of SIDES) arm(P,r,k,0.45);
     r.gills.L.forEach(g=>P.r(g,0,0,0.25)); r.gills.R.forEach(g=>P.r(g,0,0,-0.25));
   },
   run(P,r,t,sp=1){
-    const f = 8.5*sp, k = S(t,f);
-    P.r(r.body,0.1*sp,0,0); P.p(r.body,0,0.07*sp*Math.abs(S(t,f)),0);
-    P.r(r.legs.L.hip,-0.75*k*sp,0,0); P.r(r.legs.R.hip,0.75*k*sp,0,0);
-    P.r(r.legs.L.foot,0.3*Math.max(0,k),0,0); P.r(r.legs.R.foot,0.3*Math.max(0,-k),0,0);
-    for (const [kk,sd] of SIDES){ P.r(r.arms[kk].shoulder,0.8*k*sd*sp,0,-sd*0.35); P.r(r.arms[kk].elbow,-1.25,0,0); }
-    P.r(r.neck,-0.06+0.03*S(t,f*2),0,0); flapGills(P,r,t,0.12*sp,f);
-    r.tail.forEach((s,i)=>P.r(s,0,0.18*S(t,f,-i*0.5),0));
+    const f = 8.5*sp, k = S(t,f), amp=Math.min(1.15,sp);
+    P.r(r.body,0.12*amp,0,0); P.p(r.body,0,0.07*amp*Math.abs(S(t,f,Math.PI/2)),0);
+    P.r(r.legs.L.hip,-0.8*k*amp,0,0); P.r(r.legs.R.hip,0.8*k*amp,0,0);
+    P.r(r.legs.L.foot,0.35*Math.max(0,-k),0,0); P.r(r.legs.R.foot,0.35*Math.max(0,k),0,0);
+    arm(P,r,'L',0.4,ARM0.x+0.85*k*amp,ARM0.e,-1.25); arm(P,r,'R',0.4,ARM0.x-0.85*k*amp,ARM0.e,-1.25);
+    P.r(r.neck,-0.08+0.03*S(t,f*2),0,0); flapGills(P,r,t,0.12*amp,f); wagTail(P,r,t,0.18,f);
   },
   march(P,r,t){
-    const f=5.2, k=S(t,f);
-    P.r(r.legs.L.hip,-0.95*Math.max(0,k),0,0); P.r(r.legs.R.hip,-0.95*Math.max(0,-k),0,0);
-    P.r(r.legs.L.foot,0.6*Math.max(0,k),0,0); P.r(r.legs.R.foot,0.6*Math.max(0,-k),0,0);
+    const f=5.2, k=S(t,f), l=Math.max(0,k), rr=Math.max(0,-k);
+    P.r(r.legs.L.hip,-1.1*l,0,0); P.r(r.legs.R.hip,-1.1*rr,0,0);
+    P.r(r.legs.L.foot,0.7*l,0,0); P.r(r.legs.R.foot,0.7*rr,0,0);
     P.p(r.body,0,0.04*Math.abs(k),0);
-    for (const [kk,sd] of SIDES){ P.r(r.arms[kk].shoulder,0.7*k*sd,0,-sd*0.3); P.r(r.arms[kk].elbow,-1.0,0,0); }
+    arm(P,r,'L',0.45,ARM0.x+0.8*k,ARM0.e,-1.0); arm(P,r,'R',0.45,ARM0.x-0.8*k,ARM0.e,-1.0);
     breathe(P,r,t,0.5); flapGills(P,r,t,0.08,f);
   },
-  squat(P,r,t){ const d=cyc(t,2.3); squatPose(P,r,d); breathe(P,r,t,0.5); },
+  squat(P,r,t){ squatPose(P,r,cyc(t,2.3)); breathe(P,r,t,0.5); },
   wallsit(P,r,t){ squatPose(P,r,0.9,{lean:0.05}); breathe(P,r,t,0.8); P.p(r.body,0.004*S(t,40),0,0); },
   jack(P,r,t){
     const per=0.85, s=cyc(t,per);
-    for (const [k,sd] of SIDES){ P.r(r.arms[k].shoulder,0,0,sd*2.25*s); P.r(r.legs[k].hip,0,0,sd*0.3*s); P.r(r.legs[k].foot,0,0,-sd*0.3*s); }
-    P.p(r.body,0,0.12*Math.abs(S(t,TAU/per)),0); flapGills(P,r,t,0.18,TAU/per);
+    for (const [k,sd] of SIDES){ arm(P,r,k,0.75+1.5*s,0.1+0.15*s,-0.25+0.35*s); P.r(r.legs[k].hip,0,0,sd*0.32*s); P.r(r.legs[k].foot,0,0,-sd*0.32*s); }
+    P.p(r.body,0,0.11*Math.sin(Math.min(1,(t%per)/per)*Math.PI),0); flapGills(P,r,t,0.18,TAU/per);
   },
   kneeup(P,r,t){
-    const k=S(t,TAU/1.7);
-    P.r(r.legs.L.hip,-1.35*Math.max(0,k),0,0); P.r(r.legs.R.hip,-1.35*Math.max(0,-k),0,0);
-    P.r(r.legs.L.foot,0.9*Math.max(0,k),0,0); P.r(r.legs.R.foot,0.9*Math.max(0,-k),0,0);
-    for (const [kk,sd] of SIDES){ P.r(r.arms[kk].shoulder,-0.2,0,sd*2.25); P.r(r.arms[kk].elbow,0,0,sd*1.7); }
-    P.r(r.body,0.1*Math.abs(k),0.22*k,0); P.p(r.body,0,0.03*Math.abs(k),0);
+    const k=S(t,TAU/1.7), l=Math.max(0,k), rr=Math.max(0,-k);
+    P.r(r.legs.L.hip,-1.3*l,0,0); P.r(r.legs.R.hip,-1.3*rr,0,0);
+    P.r(r.legs.L.foot,0.9*l,0,0); P.r(r.legs.R.foot,0.9*rr,0,0);
+    for (const [kk] of SIDES) arm(P,r,kk,1.0,-0.9,ARM0.e,-1.5);
+    P.r(r.torso,0.22*Math.abs(k),0.2*k,0); P.r(r.neck,-0.1*Math.abs(k),0,0);
   },
   pushup(P,r,t,sp=1,hold=false){
-    const d = hold ? 0.15 : cyc(t,2.0);
-    const th = 1.08 + 0.2*d;
-    P.p(r.body,0,0,-1.0); P.r(r.body,th,0,0);
-    for (const [k,sd] of SIDES){ P.r(r.arms[k].shoulder,-th+0.1,0,-sd*0.55); P.r(r.arms[k].elbow,0.35*d,0,0); }
-    P.r(r.neck,-0.7,0,0); flapGills(P,r,t,0.06,4);
+    const d = hold ? 0.12 : cyc(t,2.0);
+    const th = 1.1 + 0.13*d;
+    P.p(r.body,0,0,-0.95); P.r(r.body,th,0,0);
+    for (const [k] of SIDES) arm(P,r,k,0.5+0.35*d,-th-0.05,ARM0.e-0.5*d,0.45*d);
+    P.r(r.neck,-0.75+0.1*d,0,0); flapGills(P,r,t,0.06,4);
+    for (const [k] of SIDES) P.r(r.legs[k].foot,-0.5,0,0);
     if (hold) P.p(r.body,0,0.004*S(t,35),0);
   },
   plank(P,r,t){ ANIMS.pushup(P,r,t,1,true); },
   lunge(P,r,t,sp=1,hold=false){
-    const d = hold ? 0.75 : cyc(t,2.4);
-    P.r(r.legs.R.hip,-0.95*d,0,0); P.r(r.legs.R.foot,0.6*d,0,0);
-    P.r(r.legs.L.hip, 0.55*d,0,0); P.r(r.legs.L.foot,-0.3*d,0,0);
-    P.p(r.torso,0,-0.11*d,0);
-    for (const [k,sd] of SIDES) P.r(r.arms[k].shoulder,0,0,-sd*0.3*d);
+    const d = hold ? 0.8 : cyc(t,2.4);
+    P.r(r.legs.R.hip,-1.0*d,0,0); P.r(r.legs.R.foot,0.75*d,0,0);
+    P.r(r.legs.L.hip, 0.6*d,0,0); P.r(r.legs.L.foot,-0.2*d,0,0);
+    P.p(r.torso,0,-0.13*d,0);
+    if (!hold) for (const [k] of SIDES) arm(P,r,k,0.95,0.1,-1.15);
     breathe(P,r,t,0.5);
   },
-  calf(P,r,t){ ANIMS.lunge(P,r,t,1,true); P.r(r.body,0.08,0,0); for (const [k] of SIDES) P.r(r.arms[k].shoulder,-1.2,0,0); },
+  calf(P,r,t){ ANIMS.lunge(P,r,t,1,true); P.r(r.body,0.1,0,0); for (const [k] of SIDES) arm(P,r,k,0.45,-1.35+0.03*S(t,2)); },
   stretch(P,r,t){
     const s = S(t,TAU/4.2);
-    for (const [k,sd] of SIDES){ P.r(r.arms[k].shoulder,0,0,sd*2.35); P.r(r.arms[k].elbow,0,0,sd*0.45); }
-    P.r(r.body,0,0,0.2*s); P.r(r.neck,0,0,0.08*s); breathe(P,r,t,0.6);
+    for (const [k] of SIDES) arm(P,r,k,2.25,0.25,0.15);
+    P.r(r.torso,0,0,0.2*s); P.r(r.neck,0,0,0.08*s); breathe(P,r,t,0.6);
   },
   fold(P,r,t){
     const d = 0.75+0.25*S(t,TAU/4);
-    P.r(r.torso,0.42*d,0,0); for (const [k] of SIDES){ P.r(r.legs[k].hip,-0.42*d,0,0); P.r(r.arms[k].shoulder,-0.9*d,0,0); }
-    P.r(r.legs.R.hip,-0.35,0,0); P.r(r.legs.R.foot,-0.4,0,0); P.r(r.neck,0.2*d,0,0); breathe(P,r,t,0.5);
+    P.r(r.torso,0.5*d,0,0); P.p(r.torso,0,0,-0.1*d);
+    for (const [k] of SIDES){ P.r(r.legs[k].hip,-0.5*d,0,0); arm(P,r,k,0.35,-0.75*d); }
+    P.r(r.neck,0.15*d,0,0); breathe(P,r,t,0.5);
   },
   quad(P,r,t){
-    P.r(r.legs.L.hip,0.9,0,0); P.r(r.legs.L.foot,-0.5,0,0);
-    P.r(r.arms.L.shoulder,0.9,0,0.25); P.r(r.arms.R.shoulder,0,0,1.2+0.05*S(t,3));
+    P.r(r.legs.L.hip,0.85,0,0); P.r(r.legs.L.foot,-0.6,0,0);
+    arm(P,r,'L',0.55,0.75); arm(P,r,'R',1.7+0.06*S(t,3),0.1,0.1);
     P.p(r.body,0.004*S(t,23),0,0); breathe(P,r,t,0.6);
   },
   shoulder(P,r,t){
     const s=cyc(t,5);
-    P.r(r.arms.R.shoulder,-1.2,0,-1.45-0.15*s); P.r(r.arms.L.shoulder,-1.0,0,0.9+0.1*s); P.r(r.arms.L.elbow,-1.2,0,0);
+    arm(P,r,'R',-0.55-0.12*s,-1.25,0); arm(P,r,'L',0.75,-0.95,ARM0.e,-1.5);
     P.r(r.neck,0,-0.15,0); breathe(P,r,t,0.6);
   },
   breathe(P,r,t){
     const s=cyc(t,5.2);
-    for (const [k,sd] of SIDES){ P.r(r.arms[k].shoulder,0,0,sd*1.9*s); P.r(r.arms[k].elbow,0,0,sd*0.3*s); }
+    for (const [k] of SIDES) arm(P,r,k,0.7+1.5*s,0.2*s,-0.25+0.4*s);
     P.s(r.body,1+0.03*s,1+0.035*s,1+0.03*s); P.r(r.neck,-0.12*s,0,0);
     r.gills.L.forEach(g=>P.r(g,0,0,-0.12*s)); r.gills.R.forEach(g=>P.r(g,0,0,0.12*s));
   },
-  tiptoe(P,r,t){ const d=cyc(t,1.6); P.p(r.body,0,0.09*d,0); for (const [k] of SIDES) P.r(r.legs[k].foot,0.35*d,0,0); for (const [k,sd] of SIDES) P.r(r.arms[k].shoulder,0,0,sd*0.5); breathe(P,r,t,0.5); },
+  tiptoe(P,r,t){ const d=cyc(t,1.6); P.p(r.body,0,0.08*d,0); for (const [k] of SIDES){ P.r(r.legs[k].foot,0.4*d,0,0); arm(P,r,k,0.95,0.1,-1.15); } breathe(P,r,t,0.5); },
   runaway(P,r,t){ ANIMS.run(P,r,t,1.3); },
-  peek(P,r,t){ breathe(P,r,t); P.r(r.body,0,0,0.25+0.04*S(t,2)); P.r(r.neck,0,0,0.15); P.r(r.arms.R.shoulder,0,0,1.6+0.4*S(t,8)); },
 };
-// rosto por humor: 'happy' | 'joy' | 'sad' | 'cry' | 'sleep' | 'focus'
+// rosto por humor: 'happy' | 'joy' | 'sad' | 'cry' | 'sleep'
 function applyFace(r,mood,t,phase){
   const eyes = r.eyes||[];
   const blink = ((t+phase)%3.9) < 0.13;
-  let ey = blink ? 0.12 : 1;
-  if (mood==='joy') ey = Math.min(ey,0.4);
-  if (mood==='sleep') ey = 0.08;
-  if (mood==='sad'||mood==='cry') ey = blink?0.12:0.82;
-  if (r.variant!=='sol') eyes.forEach(e=>e.scale.y*=ey);
   const sad = mood==='sad'||mood==='cry';
-  if (sad){ r.mouth.scale.y*=-0.9; r.mouth.position.y-=0.012; }
-  if (mood==='sleep'){ r.mouth.scale.set(r.mouth.scale.x*0.5,r.mouth.scale.y*0.5,1); }
+  let ey = blink ? 0.12 : 1;
+  if (mood==='joy') ey = Math.min(ey,0.45);
+  if (mood==='sleep') ey = 0.08;
+  if (sad && !blink) ey = 0.85;
+  if (r.variant!=='sol') eyes.forEach(e=>e.scale.y*=ey);
+  else if (mood==='sleep'||sad) eyes.forEach(e=>{ e.scale.y*=-0.7; });
+  r.mouth.visible = !sad; r.frown.visible = sad;
+  if (mood==='sleep'){ r.mouth.scale.x*=0.55; r.mouth.scale.y*=0.55; }
   r.sadBrows.forEach(b=>b.visible=sad);
   if (r.brows) r.brows.forEach(b=>b.visible=!sad);
-  r.tears.forEach((tr,i)=>{ tr.visible = mood==='cry'; if(mood==='cry'){ const u=((t*0.7)+i*0.5)%1; tr.position.y-=0.22*u; const sc=1-0.6*u; tr.scale.setScalar(sc); } });
+  if (r.cheeks) r.cheeks.forEach(c=>c.visible=!sad||mood==='cry');
+  r.tears.forEach((tr,i)=>{ tr.visible = mood==='cry'; if(mood==='cry'){ const u=((t*0.7)+i*0.5)%1; tr.position.y-=0.22*u; tr.scale.setScalar(1-0.6*u); } });
 }
 
 /* =========================================================
-   RENDERIZADOR ÚNICO PARA VÁRIOS "SLOTS" NA PÁGINA
-   Qualquer elemento com class="axo-slot" e data-axo='{...}'
-   ganha axolotes 3D desenhados por cima, na posição dele.
+   UM RENDERIZADOR 3D PARA VÁRIOS "SLOTS" NA PÁGINA
+   Qualquer elemento com class="axo-slot" e data-axo='{...}' ganha um
+   <canvas> próprio. A cena é desenhada num WebGL fora da tela e copiada
+   pra dentro de cada slot — assim o axolote rola, some, aparece e fica
+   por baixo/por cima dos outros elementos igual a qualquer imagem.
    ========================================================= */
 export class AxoStage {
-  constructor(canvas, root){
-    this.canvas=canvas; this.root=root; this.layer=root;
-    this.renderer=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio||1,2)); this.renderer.autoClear=false; this.renderer.setClearColor(0,0);
+  constructor(root){
+    this.root=root;
+    this.gl=document.createElement('canvas');
+    this.renderer=new THREE.WebGLRenderer({canvas:this.gl,antialias:true,alpha:true});
+    this.dpr=Math.min(window.devicePixelRatio||1,2);
+    this.renderer.setPixelRatio(1); this.renderer.autoClear=false; this.renderer.setClearColor(0,0);
+    this.gw=0; this.gh=0; this.ensure(256,256);
     this.scene=new THREE.Scene();
     this.scene.add(new THREE.AmbientLight(0xffffff,1.65));
     const d=new THREE.DirectionalLight(0xffffff,1.55); d.position.set(-2,4,5); this.scene.add(d);
     this.rigs={};
     for (const v of VARIANTS){ const rig=buildAxolotl(v); rig.root.visible=false; this.scene.add(rig.root); this.rigs[v.id]=rig; }
     this.cam=new THREE.PerspectiveCamera(24,1,0.1,60);
-    this.cache=new WeakMap(); this.t0=performance.now();
+    this.cache=new WeakMap(); this.t0=performance.now(); this.frame=0; this.cost=0; this.half=false;
     document.fonts?.ready.then(()=>{ const r=this.rigs.turbo; if(r&&r._bibDraw){ r._bibDraw(); r._bibTex.needsUpdate=true; } });
-    this.resize(); new ResizeObserver(()=>this.resize()).observe(root);
-    const loop=()=>{ requestAnimationFrame(loop); this.render(); }; requestAnimationFrame(loop);
+    const loop=()=>{ requestAnimationFrame(loop); try{ this.render(); }catch(e){ if(!this._err){ this._err=true; console.error(e); } } };
+    requestAnimationFrame(loop);
   }
-  resize(){ const r=this.root.getBoundingClientRect(); this.W=r.width; this.H=r.height; this.renderer.setSize(r.width,r.height,false); }
-  setLayer(el){ this.layer=el||this.root; }
+  ensure(w,h){ if(w>this.gw||h>this.gh){ this.gw=Math.max(this.gw,w); this.gh=Math.max(this.gh,h); this.renderer.setSize(this.gw,this.gh,false); } }
+  setLayer(){ /* compatibilidade: não é mais necessário */ }
   spec(el,now){
     const raw=el.dataset.axo||'{}'; let c=this.cache.get(el);
     if(!c||c.raw!==raw){
@@ -613,49 +649,54 @@ export class AxoStage {
     return c;
   }
   pose(rig,anim,t,w){
-    let [name,spd]=String(anim).split(':'); const fn=ANIMS[name]||ANIMS.idle; const sp=spd?parseFloat(spd):1;
-    fn(mk(w),rig,t*(name==='run'?1:sp),sp);
+    const [name,spd]=String(anim).split(':'); const fn=ANIMS[name]||ANIMS.idle; const sp=spd?parseFloat(spd):1;
+    fn(mk(w),rig,t,sp);
   }
   render(){
-    const R=this.renderer, now=performance.now(), T=this.fixedT ?? (now-this.t0)/1000;
-    R.setScissorTest(false); R.clear(); R.setScissorTest(true);
+    const R=this.renderer, now=performance.now(), T=this.fixedT ?? (now-this.t0)/1000, dpr=this.dpr;
     const rootR=this.root.getBoundingClientRect();
-    const slots=this.layer.querySelectorAll('.axo-slot');
+    const slots=this.root.querySelectorAll('.axo-slot');
+    this.frame++; let n=0;
     for (const el of slots){
+      const cw=el.clientWidth, ch=el.clientHeight; if(cw<4||ch<4) continue;
+      const r=el.getBoundingClientRect();
+      if (r.bottom<rootR.top-10||r.top>rootR.bottom+10||r.right<rootR.left-10||r.left>rootR.right+10) continue;
       if (el.closest('[data-axo-off]')) continue;
-      const r=el.getBoundingClientRect(); if(r.width<4||r.height<4) continue;
-      // recorte pelo contêiner rolável (não desenha por cima de barras fixas)
-      let cx0=rootR.left, cy0=rootR.top, cx1=rootR.right, cy1=rootR.bottom;
-      const clip=el.closest('[data-clip],.scroll');
-      if (clip){ const c=clip.getBoundingClientRect(); const top=+(clip.dataset.clipTop||0);
-        cx0=Math.max(cx0,c.left); cy0=Math.max(cy0,c.top+top); cx1=Math.min(cx1,c.right); cy1=Math.min(cy1,c.bottom); }
-      const sx0=Math.max(r.left,cx0), sy0=Math.max(r.top,cy0), sx1=Math.min(r.right,cx1), sy1=Math.min(r.bottom,cy1);
-      if (sx1-sx0<1||sy1-sy0<1) continue;
-      const c=this.spec(el,now), sp=c.sp, cast=sp.cast||[]; if(!cast.length) continue;
+      n++;
+      let cv=el._axoCv;
+      if(!cv||cv.parentNode!==el){ cv=document.createElement('canvas'); cv.className='axo-c'; el.appendChild(cv); el._axoCv=cv; el._axoCtx=cv.getContext('2d'); el._axoNew=true; }
+      // com muitos slots num aparelho lento, alterna os quadros (30 fps) em vez de travar tudo
+      if (this.half && !el._axoNew && ((n+this.frame)&1)) continue;
+      el._axoNew=false;
+      const w=Math.max(2,Math.round(cw*dpr)), h=Math.max(2,Math.round(ch*dpr));
+      if(cv.width!==w||cv.height!==h){ cv.width=w; cv.height=h; }
+      this.ensure(w,h);
+      const c=this.spec(el,now), sp=c.sp, cast=sp.cast||[]; if(!cast.length){ el._axoCtx.clearRect(0,0,w,h); continue; }
       // enquadramento
       const fr=sp.frame||'full';
       let y0=-0.05,y1=2.6; if(fr==='tall'){y1=3.05;} if(fr==='bust'){y0=0.95;y1=2.5;} if(fr==='head'){y0=1.12;y1=2.48;} if(fr==='low'){y0=-0.05;y1=1.9;}
       const xs=cast.map(m=>m.x||0); const xa=Math.min(...xs)-1.42, xb=Math.max(...xs)+1.42;
-      const w=(xb-xa), h=(y1-y0), cxm=(xa+xb)/2+(sp.ox||0), cym=(y0+y1)/2+(sp.oy||0);
-      const aspect=r.width/r.height, f=Math.tan(this.cam.fov*Math.PI/360), pad=1+(sp.pad??0.04);
-      const dist=Math.max(h/2/f, w/2/(f*aspect))*pad/(sp.zoom||1);
+      const bw=(xb-xa), bh=(y1-y0), cxm=(xa+xb)/2+(sp.ox||0), cym=(y0+y1)/2+(sp.oy||0);
+      const aspect=w/h, f=Math.tan(this.cam.fov*Math.PI/360), pad=1+(sp.pad??0.04);
+      const dist=Math.max(bh/2/f, bw/2/(f*aspect))*pad/(sp.zoom||1);
       this.cam.aspect=aspect; this.cam.position.set(cxm,cym+dist*0.07,dist); this.cam.lookAt(cxm,cym,0); this.cam.updateProjectionMatrix();
       for (const id in this.rigs) this.rigs[id].root.visible=false;
       cast.forEach((m,i)=>{
         const rig=this.rigs[m.id]; if(!rig) return;
         for (const o of rig.all){ const [p,ro,s,v]=o.userData.rest; o.position.copy(p); o.rotation.copy(ro); o.scale.copy(s); o.visible=v; }
         const st=c.states[i], ph=(m.ph??(i*1.37+m.id.length*0.61));
-        const t=T+ph, k=Math.min(1,(now-st.tc)/280);
-        if (st.prev && k<1){ this.pose(rig,st.prev,t,1-k); this.pose(rig,st.cur,t,k); } else this.pose(rig,st.cur,t,1);
+        const t=T+ph, k=Math.min(1,(now-st.tc)/300), e=k*k*(3-2*k);
+        if (st.prev && k<1){ this.pose(rig,st.prev,t,1-e); this.pose(rig,st.cur,t,e); } else this.pose(rig,st.cur,t,1);
         applyFace(rig,m.mood||'happy',t,ph);
+        rig.updateTail();
         rig.root.position.set(m.x||0,0,m.z||0); rig.root.rotation.set(0,m.ry||0,0); rig.root.scale.setScalar(m.s||1);
         rig.root.visible=true;
       });
-      const vx=r.left-rootR.left, vy=this.H-(r.bottom-rootR.top);
-      R.setViewport(vx,vy,r.width,r.height);
-      R.setScissor(sx0-rootR.left,this.H-(sy1-rootR.top),sx1-sx0,sy1-sy0);
-      R.render(this.scene,this.cam);
+      R.setViewport(0,0,w,h); R.setScissor(0,0,w,h); R.setScissorTest(true); R.clear(); R.render(this.scene,this.cam);
+      const ctx=el._axoCtx; ctx.clearRect(0,0,w,h); ctx.drawImage(this.gl,0,this.gh-h,w,h,0,0,w,h);
     }
+    const dt=performance.now()-now; this.cost=this.cost*0.9+dt*0.1;
+    if(!this.half && this.cost>20) this.half=true; else if(this.half && this.cost<7) this.half=false;
   }
 }
 

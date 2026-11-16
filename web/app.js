@@ -1,4 +1,9 @@
 import { AxoStage, CREW, CREW_IDS } from './axo3d.js';
+import { MiniMap, haversine, simplifyPath, pathPoints } from './map.js';
+
+// Ponte com a casca Android (existe só dentro do APK). No navegador tudo cai nos equivalentes web.
+const NATIVE = (typeof window.AxoNative !== 'undefined') ? window.AxoNative : null;
+const nat = (fn, ...a) => { try { return NATIVE && typeof NATIVE[fn] === 'function' ? NATIVE[fn](...a) : undefined; } catch (e) { return undefined; } };
 import { genPlan, GOALS, LEVELS, PARQ, JOINTS, EX, bmiOf, bmiInfo, healthFlags } from './plan.js';
 
 /* =====================================================================
@@ -9,7 +14,7 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const spec=(cast,frame='full',extra={})=>JSON.stringify({cast:Array.isArray(cast)?cast:[cast],frame,...extra});
 const axo=(cast,frame,extra)=>`data-axo='${spec(cast,frame,extra)}'`;
 const setAxo=(el,cast,frame,extra)=>{ if(el) el.dataset.axo=spec(cast,frame,extra); };
-const vib=n=>{ try{ navigator.vibrate&&navigator.vibrate(n); }catch(e){} };
+const vib=n=>{ try{ if(NATIVE) nat('vibrate',Array.isArray(n)?n.reduce((a,b)=>a+b,0):n); else navigator.vibrate&&navigator.vibrate(n); }catch(e){} };
 const mmss=s=>{ s=Math.max(0,Math.round(s)); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; };
 const fmtKm=m=>(m/1000).toFixed(2).replace('.',',');
 const G={rex:'o',turbo:'o',sol:'a',lua:'a'}, PRO={rex:'ele',turbo:'ele',sol:'ela',lua:'ela'};
@@ -66,10 +71,13 @@ document.addEventListener('pointerdown',()=>SFX.init(),{passive:true});
    ===================================================================== */
 const KEY='axogo:v1';
 const DEF=()=>({v:1,onboarded:false,profile:{name:'',goal:null,level:null,run:null,age:28,sex:null,height:168,weight:70,parq:{},joints:[],days:[1,3,5],minutes:20,reminder:'18:00',partner:'rex',streakGoal:7,careOk:false},
-  done:{},history:{},xp:0,pearls:50,fled:[],fledApplied:0,dayOffset:0,startDate:null,claimed:{},sound:true,seenHome:false});
+  done:{},history:{},xp:0,pearls:50,fled:[],fledApplied:0,dayOffset:0,startDate:null,claimed:{},sound:true,seenHome:false,acts:[],remOn:true});
 let st; try{ st=Object.assign(DEF(),JSON.parse(localStorage.getItem(KEY)||'{}')); }catch(e){ st=DEF(); }
 st.profile=Object.assign(DEF().profile,st.profile||{});
-const save=()=>{ try{ localStorage.setItem(KEY,JSON.stringify(st)); }catch(e){} };
+if(!Array.isArray(st.acts)) st.acts=[];
+function trimActs(keepPaths=30){ st.acts=st.acts.slice(0,80); st.acts.forEach((a,i)=>{ if(i>=keepPaths) delete a.path; }); }
+const save=()=>{ try{ localStorage.setItem(KEY,JSON.stringify(st)); }
+  catch(e){ try{ trimActs(5); localStorage.setItem(KEY,JSON.stringify(st)); }catch(e2){} } };
 let plan = st.onboarded ? genPlan(st.profile) : null;
 
 const DAY=864e5;
@@ -122,6 +130,11 @@ function recordActivity(stats,{node=null}={}){
   st.xp+=stats.xp; if(node) st.done[node.id]=t;
   st.fledApplied=0;
   const returned = st.fled.length ? st.fled.shift() : null;
+  const act={id:Date.now().toString(36),day:t,ts:Date.now(),kind:node?'treino':'livre',title:stats.title||(node?node.title:'Atividade livre'),
+    secs:Math.round(stats.secs),km:+(stats.km||0).toFixed(3),kcal:Math.round(stats.kcal),xp:stats.xp};
+  if(stats.path && pathPoints(stats.path)>1) act.path=simplifyPath(stats.path);
+  st.acts.unshift(act); trimActs();
+  nat('markTrained',keyOf(new Date()));
   save();
   return {first,before,after:streak(),returned};
 }
@@ -130,12 +143,15 @@ function recordActivity(stats,{node=null}={}){
    NAVEGAÇÃO, FOLHAS (SHEETS) E AVISOS
    ===================================================================== */
 const appEl=$('#app'), screensEl=$('#screens');
-const stage=new AxoStage($('#stage'),appEl);
-stage.setLayer(screensEl);
+const stage=new AxoStage(appEl);
 const SCREENS={};
 let cur=null;
+// cor da barra de status do Android por tela: [cor, ícones escuros]
+const BARS={splash:['#dcebfd',1],acender:['#131f24',0],ofensiva:['#131f24',0],fuga:['#93a6b5',1],bau:['#58c8ff',1],volta:['#fff1f6',1]};
+function setBars(name,color,dark){ const b=color?[color,dark]:(BARS[name]||['#ffffff',1]); nat('setBars',b[0],!!b[1]); const m=document.querySelector('meta[name=theme-color]'); if(m) m.content=b[0]; }
 function go(name,params={},dir='fwd'){
   closeSheet(true);
+  setBars(name);
   const el=document.createElement('div'); el.className='screen s-'+name;
   screensEl.appendChild(el);
   const cleanup=SCREENS[name](params,el);
@@ -143,6 +159,7 @@ function go(name,params={},dir='fwd'){
     if(dir==='none') old.el.remove(); else { old.el.classList.add('leave-'+dir); if(dir==='fade'||dir==='up') old.el.setAttribute('data-axo-off',''); setTimeout(()=>old.el.remove(),360); }
     if(dir!=='none') el.classList.add('enter-'+dir); }
   cur={name,el,cleanup,params};
+  if(name==='main') maybeApplyUpdate();
 }
 let sheetEl=null;
 function openSheet(html,{mount,onClose}={}){
@@ -164,13 +181,17 @@ function closeSheet(instant=false){
 }
 function toast(msg){ const t=document.createElement('div'); t.className='toast'; t.textContent=msg; $('#toasts').appendChild(t); setTimeout(()=>{ t.style.transition='opacity .3s'; t.style.opacity='0'; setTimeout(()=>t.remove(),320); },2300); }
 function typeText(el,text,done){
-  if(!el) return; let i=0; el.textContent=''; const caret=document.createElement('span'); caret.className='caret';
-  const total=text.length; const id=setInterval(()=>{
-    if(!el.isConnected){ clearInterval(id); return; }
-    i=Math.min(total,i+2); el.textContent=text.slice(0,i); if(i<total) el.appendChild(caret);
-    if(i>=total){ clearInterval(id); done&&done(); }
+  if(!el) return; clearInterval(el._tw);
+  el.classList.add('tw-box'); el.innerHTML='<span class="tw-ghost"></span><span class="tw-live"></span>';
+  el.firstChild.textContent=text;                     // reserva o tamanho final do balão
+  const live=el.lastChild, caret=document.createElement('span'); caret.className='caret';
+  let i=0; const total=text.length;
+  el._tw=setInterval(()=>{
+    if(!el.isConnected){ clearInterval(el._tw); return; }
+    i=Math.min(total,i+2); live.textContent=text.slice(0,i); if(i<total) live.appendChild(caret);
+    if(i>=total){ clearInterval(el._tw); done&&done(); }
   },28);
-  el.parentElement&&el.parentElement.addEventListener('click',()=>{ i=total; },{once:true});
+  (el.closest('.bubble')||el).onclick=()=>{ i=total; };
 }
 function confetti(el,n=40){ const c=document.createElement('div'); c.className='confetti';
   const cols=['#ff6fa3','#1cb0f6','#ffc800','#58cc02','#ce82ff','#ff9600'];
@@ -183,13 +204,13 @@ function confetti(el,n=40){ const c=document.createElement('div'); c.className='
    ===================================================================== */
 SCREENS.splash=(p,el)=>{
   el.classList.add('splash');
-  el.innerHTML=`<div class="axo-slot" ${axo({id:'rex',anim:'cheer',mood:'joy'},'tall')}></div><div class="logo">Axo<span>Go</span></div>`;
-  const t=setTimeout(()=>{ if(st.onboarded) enterApp('fade'); else go('welcome',{},'fade'); },2100);
+  el.innerHTML=`<img class="sp-logo" src="./img/logo.png" alt="" draggable="false"><div class="logo">Axo<span>Go</span></div><div class="sp-sub">Bora se mexer!</div>`;
+  const t=setTimeout(()=>{ if(st.onboarded) enterApp('fade'); else go('welcome',{},'fade'); },1700);
   return ()=>clearTimeout(t);
 };
 SCREENS.welcome=(p,el)=>{
   el.innerHTML=`<div class="welcome">
-    <div class="axo-slot" ${axo([{id:'turbo',anim:'happy',x:-2.15,z:-0.9,ry:0.3},{id:'lua',anim:'happy',x:2.15,z:-0.9,ry:-0.3},{id:'sol',anim:'idle',x:-0.8,z:-0.2,ry:0.12},{id:'rex',anim:'wave',x:0.8,z:0.3,ry:-0.12}],'full',{zoom:1.12})}></div>
+    <div class="axo-slot" ${axo([{id:'turbo',anim:'happy',x:-2.5,z:-0.9,ry:0.3},{id:'lua',anim:'happy',x:2.5,z:-0.9,ry:-0.3},{id:'sol',anim:'idle',x:-0.95,z:0,ry:0.12},{id:'rex',anim:'wave',x:0.95,z:0.2,ry:-0.12}],'full',{zoom:1.32})}></div>
     <div class="logo">Axo<span>Go</span></div>
     <p>Treinos rapidinhos, corridas guiadas e uma turma de axolotes torcendo por você!</p></div>
     <div class="foot"><button class="btn" data-go>Começar</button><button class="btn outline" data-how>Como funciona?</button></div>`;
@@ -212,6 +233,9 @@ function obSkip(id){ const p=st.profile; if(id==='articulacoes') return !p.parq.
 function obNext(id){ let i=OB_FLOW.indexOf(id)+1; while(i<OB_FLOW.length&&obSkip(OB_FLOW[i])) i++; return OB_FLOW[i]; }
 function obPrev(id){ let i=OB_FLOW.indexOf(id)-1; while(i>0&&obSkip(OB_FLOW[i])) i--; return i<0?'welcome':OB_FLOW[i]; }
 function obProg(id){ const l=OB_Q.filter(x=>!obSkip(x)); const i=l.indexOf(id); return i<0?100:Math.round((i+1)/(l.length+1)*100); }
+function obBack(id){ const prev=obPrev(id); SFX.tap();
+  if(st.onboarded && ['welcome','intro1','intro2','nome'].includes(prev)) return go('main',{tab:'me'},'back');
+  go(prev,{},'back'); }
 let lastProg=0;
 function animProg(el,p){ const i=$('.prog i',el); if(!i) return; i.style.width=Math.max(4,lastProg)+'%'; requestAnimationFrame(()=>requestAnimationFrame(()=>{ i.style.width=Math.max(4,p)+'%'; })); lastProg=p; }
 
@@ -223,7 +247,7 @@ function qScreen(el,id,{say,body,valid=()=>true,mount,cta='Continuar',onNext,coa
   animProg(el,obProg(id));
   typeText($('.tw',el),say,()=>setAxo($('.coach-row .axo-slot',el),{id:coach,anim:'idle'},'bust'));
   const nb=$('[data-next]',el); const upd=()=>{ nb.disabled=!valid(); }; upd();
-  $('[data-back]',el).onclick=()=>{ SFX.tap(); go(obPrev(id),{},'back'); };
+  $('[data-back]',el).onclick=()=>obBack(id);
   nb.onclick=()=>{ if(!valid()) return; SFX.ok(); save(); (onNext||(()=>go(obNext(id))))(); };
   mount&&mount(el,upd);
 }
@@ -235,7 +259,7 @@ function heroTalk(el,id,text,{anim='wave',back=true,cta='Continuar'}={}){
     <div class="hero-talk"><div class="bubble down"><span class="tw"></span></div><div class="axo-slot" ${axo({id:'rex',anim:'talk'},'full')}></div></div>
     <div class="foot"><button class="btn" data-next>${cta}</button></div>`;
   typeText($('.tw',el),text,()=>setAxo($('.hero-talk .axo-slot',el),{id:'rex',anim},'full'));
-  $('[data-back]',el)&&($('[data-back]',el).onclick=()=>{ SFX.tap(); go(obPrev(id),{},'back'); });
+  $('[data-back]',el)&&($('[data-back]',el).onclick=()=>obBack(id));
   $('[data-next]',el).onclick=()=>{ SFX.ok(); go(obNext(id)); };
 }
 SCREENS.intro1=(p,el)=>heroTalk(el,'intro1','Oi! Eu sou o Rex 😎 e essa é a minha turma de axolotes!',{anim:'wave'});
@@ -294,7 +318,7 @@ SCREENS.saude=(p,el)=>{ const P=st.profile; const qs=PARQ.filter(q=>!q.onlyIf||q
     <p class="note">Baseado no questionário PAR-Q+, usado por profissionais de educação física antes de começar um treino.</p>`,
   valid:()=>qs.every(q=>typeof P.parq[q.id]==='boolean'),
   mount:(el,upd)=>$$('.yn',el).forEach(g=>$$('button',g).forEach(b=>b.onclick=()=>{ $$('button',g).forEach(x=>x.classList.remove('on')); b.classList.add('on'); P.parq[g.dataset.q]=b.dataset.a==='1'; if(P.parq.q6===false) P.joints=[]; SFX.pop(); upd();
-    const next=g.closest('.card').nextElementSibling; if(next&&next.classList.contains('card')){ const sc=$('.scroll',el); sc.scrollTo({top:next.offsetTop-80,behavior:'smooth'}); } }))
+    const next=g.closest('.card').nextElementSibling, sc=$('.scroll',el); if(next&&next.classList.contains('card')){ const nr=next.getBoundingClientRect(), sr=sc.getBoundingClientRect(); if(nr.bottom>sr.bottom-12) sc.scrollBy({top:nr.bottom-sr.bottom+24,behavior:'smooth'}); } else sc.scrollTo({top:sc.scrollHeight,behavior:'smooth'}); }))
 });};
 SCREENS.articulacoes=(p,el)=>{ const P=st.profile; qScreen(el,'articulacoes',{
   say:'Onde você sente dor ou já teve lesão? Vou adaptar os exercícios.',
@@ -333,7 +357,7 @@ SCREENS.tempo=(p,el)=>{ const P=st.profile; qScreen(el,'tempo',{
 SCREENS.horario=(p,el)=>{ const P=st.profile; const opts=[['🌅','Manhã','07:00'],['☀️','Almoço','12:00'],['🌇','Fim de tarde','18:00'],['🌙','Noite','20:00']];
   qScreen(el,'horario',{
   say:'Que horas eu te chamo pra treinar?',
-  body:optsHTML(opts.map(o=>({v:o[2],e:o[0],t:o[1],tag:o[2]})),P.reminder)+`<div class="card" style="margin-top:12px;display:flex;align-items:center;justify-content:space-between"><b style="font-weight:800">Outro horário</b><input type="time" class="field" style="width:130px;height:46px;font-size:17px" value="${P.reminder}"></div>
+  body:optsHTML(opts.map(o=>({v:o[2],e:o[0],t:o[1],tag:o[2]})),P.reminder)+`<div class="card" style="margin-top:12px;display:flex;align-items:center;justify-content:space-between"><b style="font-weight:800">Outro horário</b><input type="time" class="field" style="width:150px;height:46px;font-size:17px;padding:0 10px" value="${P.reminder}"></div>
     <p class="note">Eu e a turma vamos te lembrar no horário escolhido. Você pode mudar depois no seu perfil.</p>`,
   mount:(el,upd)=>{ bindSingle(el,'.opt','v',v=>{ P.reminder=v; $('input[type=time]',el).value=v; },upd); $('input[type=time]',el).onchange=e=>{ P.reminder=e.target.value||'18:00'; $$('.opt',el).forEach(x=>x.classList.toggle('sel',x.dataset.v===P.reminder)); }; }
 });};
@@ -350,7 +374,7 @@ SCREENS.parceiro=(p,el)=>{ const P=st.profile; let sel=P.partner;
   info();
   $$('.ptab',el).forEach(b=>b.onclick=()=>{ sel=b.dataset.id; $$('.ptab',el).forEach(x=>x.classList.toggle('sel',x===b)); info(); SFX.pop(); vib(10);
     const s=$('.partner-stage .axo-slot',el); setAxo(s,{id:sel,anim:'cheer',mood:'joy'},'full',{pad:0.08}); clearTimeout(el._t); el._t=setTimeout(()=>setAxo(s,{id:sel,anim:'wave'},'full',{pad:0.08}),1600); });
-  $('[data-back]',el).onclick=()=>{ SFX.tap(); go(obPrev('parceiro'),{},'back'); };
+  $('[data-back]',el).onclick=()=>obBack('parceiro');
   $('[data-next]',el).onclick=()=>{ P.partner=sel; save(); SFX.ok(); go('gerando'); };
 };
 SCREENS.gerando=(p,el)=>{ const P=st.profile;
@@ -373,7 +397,7 @@ SCREENS.plano=(p,el)=>{ const P=st.profile; plan=genPlan(P); const pl=plan;
     <div class="kpis"><div class="kpi"><b>${pl.n}x</b><span>por semana</span></div><div class="kpi"><b>${P.minutes}</b><span>min/treino</span></div><div class="kpi"><b style="font-size:15px;line-height:27px">${pl.levelName}</b><span>nível</span></div></div>
     ${pl.care||pl.caution?`<div style="margin-bottom:12px"><span class="badge care">${pl.care?'❤️ Modo Cuidado':'⚠️ Atenção extra'}</span></div>`:''}
     <div class="card goal-card"><div class="gi">${goal.emoji}</div><div><small>Sua meta</small><b>${pl.projection}</b></div></div>
-    <div class="card"><h4>Carga de treino nas 4 semanas</h4><div class="bars">${load.map((m,i)=>`<div><em>${m}%</em><i style="height:${m/125*100}%;animation-delay:${i*120}ms"></i><span>${i===3?'Sem. leve':'Sem. '+(i+1)}</span></div>`).join('')}</div>
+    <div class="card"><h4>Carga de treino nas 4 semanas</h4><div class="bars">${load.map((m,i)=>`<div><em>${m}%</em><u><i style="height:${m/125*100}%;animation-delay:${i*120}ms"></i></u><span>${i===3?'Sem. leve':'Sem. '+(i+1)}</span></div>`).join('')}</div>
       <p class="note">A 4ª semana é mais leve de propósito: é quando o corpo se adapta e você volta mais forte.</p></div>
     <div class="card"><h4>Frequência cardíaca alvo</h4><div style="display:flex;gap:14px;align-items:center"><div style="font-size:30px">❤️</div><div><b style="font-weight:900;font-size:22px">${pl.zone[0]}–${pl.zone[1]} bpm</b><p class="note" style="margin:0">no treino · trote regenerativo: ${pl.regen[0]}–${pl.regen[1]} bpm</p></div></div></div>
     <div class="card"><h4>Todo treino tem 4 partes</h4><div class="flow">
@@ -409,7 +433,7 @@ SCREENS.meta=(p,el)=>{ const P=st.profile; const G=[[7,35,'Bom começo'],[14,140
 function finishOnboarding(){
   const first=!st.onboarded;
   st.onboarded=true; if(!st.startDate) st.startDate=todayK();
-  plan=genPlan(st.profile); save();
+  plan=genPlan(st.profile); save(); syncReminder();
   go('main',{tab:'home',welcome:first},'fade');
 }
 function enterApp(dir='fade'){
@@ -493,11 +517,6 @@ function tabHome(v,p,mainEl){
     }).join('')}
     <div class="end-note">${ci>=all.length?'Você completou o plano inteiro! 🏆 Novas unidades chegam em breve.':'Mais unidades aparecem conforme você evolui ✨'}</div></div>`;
   const sc=$('#pathScroll',v);
-  // recorte do 3D por baixo do cabeçalho grudado da unidade
-  const onScroll=()=>{ let top=0; const r=sc.getBoundingClientRect();
-    for(const h of $$('.unit-head',sc)){ const hr=h.getBoundingClientRect(), ur=h.parentElement.getBoundingClientRect(); if(hr.top<=r.top+12 && ur.bottom>r.top+hr.height+20){ top=hr.bottom-r.top+6; } }
-    sc.dataset.clipTop=top; };
-  sc.addEventListener('scroll',onScroll,{passive:true});
   $('[data-demo]',v).onclick=()=>{ SFX.tap(); demoSheet(); };
   $$('[data-guide]',v).forEach(b=>b.onclick=()=>{ SFX.tap(); guideSheet(plan.units[+b.dataset.guide]); });
   $$('.node',v).forEach(b=>b.onclick=e=>{ e.stopPropagation(); togglePop(v,b.dataset.node); });
@@ -506,9 +525,9 @@ function tabHome(v,p,mainEl){
   requestAnimationFrame(()=>{ const c=$('.node.cur',v); if(c){ const r=c.getBoundingClientRect(), sr=sc.getBoundingClientRect(); const target=sc.scrollTop+r.top-sr.top-sr.height*0.55; if(target>0) sc.scrollTo({top:target,behavior:p.welcome?'auto':'smooth'}); }
     if(p.welcome && c) setTimeout(()=>{ togglePop(v,c.dataset.node); },700);
     if(p.justDone){ const d=$(`[data-node="${p.justDone}"]`,v); if(d){ d.animate([{transform:'scale(1.35)'},{transform:'scale(1)'}],{duration:600,easing:'cubic-bezier(.2,1.6,.4,1)'}); } }
-    onScroll(); });
+  });
 }
-function closePop(v){ const o=$('.pop',v); if(o){ o.remove(); $$('.coach-spot',v).forEach(c=>c.removeAttribute('data-axo-off')); } }
+function closePop(v){ const o=$('.pop',v); if(o) o.remove(); }
 function togglePop(v,id){
   const was=$('.pop',v)?.dataset.for; closePop(v); if(was===id) return;
   const all=allNodes(), idx=all.findIndex(n=>n.id===id), n=all[idx], u=plan.units[n.unit], s=nodeStatus(n,idx,curIndex());
@@ -527,7 +546,6 @@ function togglePop(v,id){
     pop.innerHTML = s==='cur'?`<h3>${n.title}</h3><p>Você completou a unidade! Hora de comemorar com a turma.</p><button class="btn" data-trophy>Comemorar</button>`:s==='done'?`<h3>Unidade concluída ✓</h3><p>Troféu garantido!</p>`:`<h3>${n.title}</h3><p>Complete todos os treinos da unidade.</p><button class="btn" disabled>Bloqueado</button>`;
   }
   wrap.after(pop);
-  $$('.coach-spot',v).forEach(c=>c.setAttribute('data-axo-off',''));
   const sc=$('#pathScroll',v); const pr=pop.getBoundingClientRect(), sr=sc.getBoundingClientRect(); if(pr.bottom>sr.bottom-10) sc.scrollBy({top:pr.bottom-sr.bottom+20,behavior:'smooth'});
   $('[data-start]',pop)&&($('[data-start]',pop).onclick=()=>{ SFX.ok(); go('treino',{nodeId:n.id},'up'); });
   $('[data-det]',pop)&&($('[data-det]',pop).onclick=()=>{ SFX.tap(); workoutSheet(n, s==='cur'&&!pathToday()); });
@@ -583,6 +601,7 @@ function demoSheet(){
   openSheet(`<div class="sh-head"><h2>🧪 Modo demonstração</h2><p>Simule a passagem dos dias pra ver a turma reagir.</p></div>
    <div class="scroll"><div class="opts">
      <button class="opt" data-a="train"><span class="em">💪</span><span class="t">Concluir o treino de hoje<span class="sub">Pula o treino e vai direto pra comemoração</span></span></button>
+     <button class="opt" data-a="sim"><span class="em">🗺️</span><span class="t">Simular uma corrida com mapa<span class="sub">Gera um percurso de exemplo pra ver o mapa no final</span></span></button>
      <button class="opt" data-a="day"><span class="em">⏭️</span><span class="t">Avançar 1 dia<span class="sub">Hoje é ${DNL[nowD().getDay()]} · ${isTrain(nowD())?'dia de treino':'dia de descanso'}</span></span></button>
      <button class="opt" data-a="skip2"><span class="em">😴</span><span class="t">Faltar 2 dias de treino<span class="sub">A turma fica triste e alguém foge</span></span></button>
      <button class="opt" data-a="reset"><span class="em">🔄</span><span class="t">Apagar tudo e recomeçar<span class="sub">Volta pro cadastro do zero</span></span></button>
@@ -590,7 +609,8 @@ function demoSheet(){
    {mount:L=>{ $('[data-x]',L).onclick=()=>closeSheet();
      $$('[data-a]',L).forEach(b=>b.onclick=()=>{ const a=b.dataset.a; SFX.ok();
        if(a==='train'){ const n=allNodes()[curIndex()]; if(!n||n.kind!=='workout'){ toast('Abra o baú/troféu da trilha primeiro 😉'); return; } if(pathToday()){ toast('Você já treinou hoje — avance 1 dia 💤'); return; }
-         const stats={secs:n.minutes*60,kcal:n.kcal,km:n.hasRun?1.8:0,xp:n.xp}; const res=recordActivity(stats,{node:n}); go('fim',{stats,res,nodeId:n.id},'fade'); }
+         const stats={secs:n.minutes*60,kcal:n.kcal,km:0,xp:n.xp}; const res=recordActivity(stats,{node:n}); go('fim',{stats,res,nodeId:n.id},'fade'); }
+       if(a==='sim'){ const stats=fakeRun(); const res=recordActivity(stats); closeSheet(true); go('fim',{stats,res,free:true},'fade'); }
        if(a==='day'){ st.dayOffset++; save(); closeSheet(true); enterApp('fade'); }
        if(a==='skip2'){ let c=0; while(c<2){ st.dayOffset++; if(isTrain(nowD())) c++; } st.dayOffset++; save(); closeSheet(true); enterApp('fade'); }
        if(a==='reset'){ try{ localStorage.removeItem(KEY); }catch(e){} st=DEF(); plan=null; lastProg=0; go('welcome',{},'fade'); }
@@ -600,96 +620,143 @@ function demoSheet(){
 /* =====================================================================
    PLAYER DO TREINO (passo a passo guiado pelos axolotes)
    ===================================================================== */
-const hav=(a,b)=>{ const R=6371e3,t=x=>x*Math.PI/180; const dl=t(b[0]-a[0]),dn=t(b[1]-a[1]); const h=Math.sin(dl/2)**2+Math.cos(t(a[0]))*Math.cos(t(b[0]))*Math.sin(dn/2)**2; return 2*R*Math.asin(Math.sqrt(h)); };
-const GPS={id:null,dist:0,last:null,lastT:0,status:'off',
-  start(){ if(this.id!==null) return; if(!('geolocation' in navigator)){ this.status='nogps'; return; } this.status='wait';
-    try{ this.id=navigator.geolocation.watchPosition(pos=>{ const {latitude:la,longitude:lo,accuracy:ac}=pos.coords; this.status='ok'; if(this.paused) return; if(ac>40) return;
-        if(this.last){ const d=hav(this.last,[la,lo]), dt=Math.max(1,(pos.timestamp-this.lastT)/1000); if(d>=3&&d/dt<12){ this.dist+=d; this.last=[la,lo]; this.lastT=pos.timestamp; } }
-        else { this.last=[la,lo]; this.lastT=pos.timestamp; } },
-      err=>{ this.status=err.code===1?'denied':'nosignal'; },{enableHighAccuracy:true,maximumAge:1000,timeout:20000}); }catch(e){ this.status='nogps'; } },
-  setPaused(p){ this.paused=p; if(p) this.last=null; },
-  stop(){ if(this.id!==null){ try{ navigator.geolocation.clearWatch(this.id); }catch(e){} } this.id=null; },
-  reset(){ this.stop(); this.dist=0; this.last=null; this.status='off'; this.paused=false; },
-  label(){ return {off:'GPS desligado',wait:'Procurando sinal de GPS…',ok:'GPS ativo — medindo a distância',denied:'Localização bloqueada: contando só o tempo',nosignal:'Sem sinal de GPS: contando só o tempo',nogps:'GPS indisponível: contando só o tempo'}[this.status]; },
+// Mantém a tela acesa durante o treino (nativo no APK; Wake Lock no navegador).
+let _wake=null;
+function keepAwake(on){
+  if(NATIVE){ nat('keepAwake',!!on); return; }
+  try{ if(on){ navigator.wakeLock&&navigator.wakeLock.request('screen').then(w=>{ _wake=w; }).catch(()=>{}); } else if(_wake){ _wake.release().catch(()=>{}); _wake=null; } }catch(e){}
+}
+
+/* GPS: no APK usa o serviço nativo (continua com a tela apagada); no navegador usa a localização do próprio navegador.
+   path = lista de [lat,lon]; null marca uma quebra (pausa), pra não ligar pontos distantes com uma reta. */
+const GPS={on:false,dist:0,path:[],last:null,lastT:0,status:'off',paused:false,cur:null,acc:0,jumps:0,watch:null,poll:null,
+  start(){ if(this.on) return; this.on=true; this.status='wait';
+    if(NATIVE){ nat('startTracking'); this.poll=setInterval(()=>this.pump(),1000); return; }
+    if(!('geolocation' in navigator)){ this.status='nogps'; return; }
+    try{ this.watch=navigator.geolocation.watchPosition(
+        pos=>this.fix(pos.coords.latitude,pos.coords.longitude,pos.coords.accuracy,pos.timestamp),
+        err=>{ this.status=err.code===1?'denied':(this.status==='ok'?'ok':'nosignal'); },
+        {enableHighAccuracy:true,maximumAge:1000,timeout:20000}); }catch(e){ this.status='nogps'; } },
+  pump(){ if(!NATIVE||!this.on) return;
+    let pts=[]; try{ pts=JSON.parse(nat('drainPoints')||'[]'); }catch(e){}
+    for(const q of pts) this.fix(q[0],q[1],q[2],q[3]);
+    const s=nat('trackState');
+    if(!(pts.length)) this.status={asking:'wait',wait:this.status==='ok'?'ok':'wait',ok:'ok',denied:'denied',disabled:'disabled',error:'nogps',off:'wait'}[s]||this.status; },
+  fix(la,lo,ac,ts){ this.status='ok'; this.cur=[la,lo]; this.acc=ac;
+    if(this.paused||ac>35) return;
+    if(!this.last){ this.last=[la,lo]; this.lastT=ts; this.path.push([la,lo]); return; }
+    const d=haversine(this.last,[la,lo]), dt=Math.max(0.5,(ts-this.lastT)/1000);
+    if(d<Math.max(2.5,Math.min(ac,14)*0.45)) return;                 // tremedeira do GPS parado
+    if(d/dt>9){ if(++this.jumps>4){ this.last=[la,lo]; this.lastT=ts; this.path.push(null,[la,lo]); this.jumps=0; } return; } // salto impossível
+    this.jumps=0; this.dist+=d; this.last=[la,lo]; this.lastT=ts; this.path.push([la,lo]); },
+  setPaused(v){ v=!!v; if(v===this.paused) return; this.paused=v; if(v){ this.last=null; if(this.path.length&&this.path[this.path.length-1]!==null) this.path.push(null); } },
+  stop(){ if(!this.on) return; if(NATIVE){ this.pump(); clearInterval(this.poll); this.poll=null; nat('stopTracking'); }
+    else if(this.watch!==null){ try{ navigator.geolocation.clearWatch(this.watch); }catch(e){} this.watch=null; }
+    this.on=false; },
+  reset(){ this.stop(); this.dist=0; this.path=[]; this.last=null; this.status='off'; this.paused=false; this.cur=null; this.jumps=0; },
+  label(){ return {off:'GPS desligado',wait:'Procurando sinal de GPS…',ok:'GPS ativo',denied:'Localização bloqueada',disabled:'Ative o GPS do celular',nosignal:'Sem sinal de GPS',nogps:'GPS indisponível'}[this.status]; },
   cls(){ return this.status==='ok'?'ok':this.status==='wait'||this.status==='off'?'':'bad'; },
+  hint(){ if(this.status==='denied') return NATIVE?'Libere a permissão de localização do AxoGo nas configurações do celular.':'A localização está bloqueada aqui. No app instalado o mapa acompanha você.';
+    if(this.status==='disabled') return 'Ligue a localização (GPS) do celular pra medir a distância.';
+    if(this.status==='nogps'||this.status==='nosignal') return 'Sem GPS agora: estou contando só o tempo.';
+    return ''; },
 };
+
 SCREENS.treino=({nodeId},el)=>{
   const n=allNodes().find(x=>x.id===nodeId); const P=st.profile;
   const steps=[]; n.blocks.forEach((b,bi)=>b.steps.forEach((s,si)=>steps.push({...s,bi,si,b})));
-  let i=0, left=0, total=0, paused=true, elapsed=0, kcal=0, lastBeep=-1, lastT=performance.now(), started=false;
-  GPS.reset();
-  el.innerHTML=`<div class="pl-top"><button class="icon-btn" data-x>${IC.close}</button><div class="segs">${n.blocks.map((b,bi)=>`<div style="--w:${Math.max(1,b.steps.reduce((a,s)=>a+s.secs,0))};--sc:${BLOCK_COL[b.key][0]}"><i data-seg="${bi}" style="width:0"></i></div>`).join('')}</div></div>
+  let i=0, left=0, total=0, paused=true, elapsed=0, runSecs=0, kcal=0, lastBeep=-1, lastT=Date.now(), started=false, done=false;
+  GPS.reset(); keepAwake(true);
+  el.innerHTML=`<div class="pl-top"><button class="icon-btn" data-x aria-label="Sair do treino">${IC.close}</button><div class="segs">${n.blocks.map((b,bi)=>`<div style="--w:${Math.max(1,b.steps.reduce((a,s)=>a+s.secs,0))};--sc:${BLOCK_COL[b.key][0]}"><i data-seg="${bi}" style="width:0"></i></div>`).join('')}</div></div>
     <div class="pl-main"><span class="pl-chip"></span><div class="pl-name"></div><div class="pl-round"></div>
-      <div class="pl-coach"><div class="bubble down pl-tip"><span class="tw"></span></div><div class="axo-slot"></div></div>
+      <div class="bubble down pl-tip"><span class="tw"></span></div>
+      <div class="pl-coach"><div class="axo-slot"></div></div>
       <div class="gps" hidden><div><b data-km>0,00</b><span>km</span></div><div><b data-pace>--:--</b><span>ritmo /km</span></div><div><b data-kc>0</b><span>kcal</span></div></div>
       <div class="gps-status" hidden><i></i><span></span></div>
       <div data-meter></div><div class="pl-next"></div></div>
-    <div class="foot"><div class="pl-ctrl"><button class="btn outline sq" data-pause>${IC.pause}</button><button class="btn" data-next>Próximo</button></div></div>
+    <div class="foot"><div class="pl-ctrl"><button class="btn outline sq" data-pause aria-label="Pausar">${IC.pause}</button><button class="btn" data-next>Próximo</button></div></div>
     <div class="count-over"><span>3</span></div>`;
   const R=56, C=2*Math.PI*R;
   const show=()=>{ const s=steps[i], b=s.b, coach=coachFor(b.coach), [bc,bl]=BLOCK_COL[b.key]; const e=EX[s.ex]||{};
     const chip=$('.pl-chip',el); chip.textContent=b.title; chip.style.setProperty('--bc',bc); chip.style.setProperty('--bc-l',bl);
     $('.pl-name',el).textContent=s.name+(s.bonus?' ⭐':'');
-    $('.pl-round',el).textContent=s.rounds?`Rodada ${s.round} de ${s.rounds}`:`Passo ${i+1} de ${steps.length}`;
-    setAxo($('.pl-coach .axo-slot',el),{id:coach,anim:s.anim,mood:s.kind==='rest'?'happy':'happy',ry:e.ry??0.38},e.frame||'tall',{pad:0.02});
+    $('.pl-round',el).textContent=s.rounds?`Rodada ${s.round} de ${s.rounds} · passo ${i+1} de ${steps.length}`:`Passo ${i+1} de ${steps.length}`;
+    setAxo($('.pl-coach .axo-slot',el),{id:coach,anim:s.anim,ry:e.ry??0.38},e.frame||'tall',{pad:0.02});
     let tip=s.tip; if(s.si===0&&coach!==b.coach) tip=`${cname(b.coach)} fugiu, então eu te guio nessa parte! `+tip;
     if(s.kind==='rest') tip='Descansa! Respira fundo e bebe um golinho de água 💧';
     typeText($('.tw',el),tip);
     left=s.kind==='reps'?0:s.secs; total=s.secs; lastBeep=-1;
-    const isRun=s.kind==='run'; $('.gps',el).hidden=!isRun; $('.gps-status',el).hidden=!isRun; if(isRun) GPS.start(); GPS.setPaused(!isRun);
+    const isRun=s.kind==='run'; $('.gps',el).hidden=!isRun; $('.gps-status',el).hidden=!isRun; GPS.setPaused(!isRun||paused);
     $('[data-meter]',el).innerHTML = s.kind==='reps' ? `<div class="pl-reps">${s.reps}x</div>` :
-      `<div class="pl-timer"><svg viewBox="0 0 132 132"><circle cx="66" cy="66" r="${R}" fill="none" stroke="#eee" stroke-width="12"/><circle data-ring cx="66" cy="66" r="${R}" fill="none" stroke="${bc}" stroke-width="12" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="0"/></svg><div class="num"><div><span data-t>${mmss(left)}</span><small>${s.kind==='rest'?'DESCANSO':isRun?'CORRENDO':'TEMPO'}</small></div></div></div>`;
+      `<div class="pl-timer"><svg viewBox="0 0 132 132"><circle cx="66" cy="66" r="${R}" fill="none" stroke="#eee" stroke-width="12"/><circle data-ring cx="66" cy="66" r="${R}" fill="none" stroke="${bc}" stroke-width="12" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="0"/></svg><div class="num"><div><span data-t>${mmss(left)}</span><small>${s.kind==='rest'?'DESCANSO':isRun?'EM MOVIMENTO':'TEMPO'}</small></div></div></div>`;
     const nx=steps[i+1]; $('.pl-next',el).textContent=nx?`A seguir: ${nx.name}${nx.kind==='reps'?' · '+nx.reps+'x':' · '+mmss(nx.secs)}`:'Último passo! 💪';
-    $('[data-next]',el).textContent = s.kind==='reps'?'Feito!':s.kind==='rest'?'Pular descanso':'Próximo';
-    $('[data-next]',el).className = 'btn'+(s.kind==='reps'?' green':'');
-    n.blocks.forEach((bb,bi)=>{ const before=steps.filter(x=>x.bi===bi).reduce((a,x)=>a+(steps.indexOf(x)<i?x.secs:0),0), tt=bb.steps.reduce((a,x)=>a+x.secs,0); $(`[data-seg="${bi}"]`,el).style.width=(before/tt*100)+'%'; });
+    const nb=$('[data-next]',el); nb.textContent = s.kind==='reps'?'Feito!':s.kind==='rest'?'Pular descanso':'Próximo'; nb.className='btn'+(s.kind==='reps'?' green':'');
+    n.blocks.forEach((bb,bi)=>{ let before=0, tt=0; steps.forEach((x,xi)=>{ if(x.bi===bi){ tt+=x.secs; if(xi<i) before+=x.secs; } }); $(`[data-seg="${bi}"]`,el).style.width=(tt?before/tt*100:0)+'%'; });
   };
-  const next=()=>{ const s=steps[i]; if(s.kind==='reps'){ kcal+=s.met*P.weight*s.secs/3600; elapsed+=0; }
-    if(i>=steps.length-1){ finish(); return; } i++; SFX.go(); vib(30); show(); };
-  const finish=()=>{ clearInterval(timer); GPS.stop(); paused=true;
-    const stats={secs:Math.max(elapsed,60),kcal:Math.round(kcal),km:GPS.dist/1000,xp:n.xp};
+  const finish=()=>{ if(done) return; done=true; clearInterval(timer); GPS.stop(); keepAwake(false);
+    const stats={secs:Math.max(elapsed,60),kcal:Math.round(kcal),km:GPS.dist/1000,xp:n.xp,path:GPS.path.slice(),title:n.title};
     const res=recordActivity(stats,{node:n}); go('fim',{stats,res,nodeId:n.id},'fade'); };
-  const timer=setInterval(()=>{ const now=performance.now(), dt=(now-lastT)/1000; lastT=now; if(paused||!started) return;
-    const s=steps[i]; elapsed+=dt;
-    if(s.kind!=='reps'){ left-=dt; kcal+=s.met*P.weight*dt/3600;
-      const ring=$('[data-ring]',el); if(ring) ring.style.strokeDashoffset=C*(1-Math.max(0,left)/total);
+  const advance=()=>{ if(i>=steps.length-1){ finish(); return false; } i++; SFX.go(); vib(30); show(); return true; };
+  const tick=()=>{ const now=Date.now(); let dt=(now-lastT)/1000; lastT=now; if(paused||!started||done||!(dt>0)) return;
+    let guard=0;                                           // se o celular dormiu, recupera o tempo passado de uma vez
+    while(dt>0.0005 && guard++<500){ const s=steps[i];
+      if(s.kind==='reps'){ elapsed+=Math.min(dt,30); break; }
+      const use=Math.min(dt,left); left-=use; dt-=use; elapsed+=use; kcal+=s.met*P.weight*use/3600; if(s.kind==='run') runSecs+=use;
+      if(left<=0.0005 && !advance()) return; }
+    const s=steps[i];
+    if(s.kind!=='reps'){ const ring=$('[data-ring]',el); if(ring) ring.style.strokeDashoffset=C*(1-Math.max(0,left)/total);
       const tt=$('[data-t]',el); if(tt) tt.textContent=mmss(Math.ceil(left));
-      const sec=Math.ceil(left); if(sec<=3&&sec>0&&sec!==lastBeep){ lastBeep=sec; SFX.beep(); }
-      if(left<=0) next(); }
-    else kcal+=0;
-    if(n.hasRun){ $('[data-km]',el).textContent=fmtKm(GPS.dist); $('[data-kc]',el).textContent=Math.round(kcal);
-      const runT=elapsed; $('[data-pace]',el).textContent=GPS.dist>50?mmss(runT/(GPS.dist/1000)):'--:--';
-      const gs=$('.gps-status',el); gs.className='gps-status '+GPS.cls(); $('span',gs).textContent=GPS.label(); }
-  },200);
+      const sec=Math.ceil(left); if(sec<=3&&sec>0&&sec!==lastBeep){ lastBeep=sec; SFX.beep(); } }
+    if(s.kind==='run'){ $('[data-km]',el).textContent=fmtKm(GPS.dist); $('[data-kc]',el).textContent=Math.round(kcal);
+      $('[data-pace]',el).textContent=GPS.dist>50?mmss(runSecs/(GPS.dist/1000)):'--:--';
+      const gs=$('.gps-status',el); gs.className='gps-status '+GPS.cls(); $('span',gs).textContent=GPS.hint()||GPS.label(); }
+  };
+  const timer=setInterval(tick,200);
   show();
   // contagem 3-2-1
   const co=$('.count-over',el); let c=3;
-  const cd=setInterval(()=>{ c--; if(c>0){ co.innerHTML=`<span>${c}</span>`; SFX.beep(); } else if(c===0){ co.innerHTML=`<span style="font-size:72px">VAI!</span>`; SFX.go(); } else { clearInterval(cd); co.remove(); started=true; paused=false; lastT=performance.now(); } },800);
+  const cd=setInterval(()=>{ c--; if(c>0){ co.innerHTML=`<span>${c}</span>`; SFX.beep(); } else if(c===0){ co.innerHTML=`<span style="font-size:72px">VAI!</span>`; SFX.go(); }
+    else { clearInterval(cd); co.remove(); started=true; paused=false; lastT=Date.now(); if(n.hasRun) GPS.start(); GPS.setPaused(steps[i].kind!=='run'); } },800);
   SFX.beep();
-  $('[data-next]',el).onclick=()=>{ if(!started) return; next(); };
-  $('[data-pause]',el).onclick=e=>{ if(!started) return; paused=!paused; GPS.setPaused(paused||steps[i].kind!=='run'); e.currentTarget.innerHTML=paused?IC.play:IC.pause; SFX.tap(); toast(paused?'Treino pausado ⏸':'Bora continuar! ▶️'); };
-  $('[data-x]',el).onclick=()=>{ const wasPaused=paused; paused=true; SFX.tap();
+  $('[data-next]',el).onclick=()=>{ if(!started||done) return; const s=steps[i]; if(s.kind==='reps') kcal+=s.met*P.weight*s.secs/3600; advance(); };
+  $('[data-pause]',el).onclick=e=>{ if(!started||done) return; paused=!paused; lastT=Date.now(); GPS.setPaused(paused||steps[i].kind!=='run'); e.currentTarget.innerHTML=paused?IC.play:IC.pause; SFX.tap(); toast(paused?'Treino pausado ⏸':'Bora continuar! ▶️'); };
+  $('[data-x]',el).onclick=()=>{ if(done||sheetEl) return; const wasPaused=paused; paused=true; GPS.setPaused(true); SFX.tap();
+    const resume=()=>{ paused=wasPaused; lastT=Date.now(); GPS.setPaused(paused||steps[i].kind!=='run'); };
+    let quit=false;
     openSheet(`<div class="sh-head" style="text-align:center"><div class="axo-slot" style="height:150px" ${axo({id:coachFor(steps[i].b.coach),anim:'sad',mood:'sad'},'full')}></div><h2>Vai parar agora?</h2><p>Se sair, o progresso deste treino não é salvo.</p></div>
       <div class="foot"><button class="btn" data-k>Continuar treinando</button><button class="btn link" style="color:var(--red)" data-q>Sair do treino</button></div>`,
-      {mount:L=>{ $('[data-k]',L).onclick=()=>{ paused=wasPaused; closeSheet(); }; $('[data-q]',L).onclick=()=>{ clearInterval(timer); GPS.stop(); closeSheet(true); go('main',{tab:'home'},'back'); }; }}); };
-  return ()=>{ clearInterval(timer); clearInterval(cd); GPS.stop(); };
+      {onClose:()=>{ if(!quit) resume(); },
+       mount:L=>{ $('[data-k]',L).onclick=()=>closeSheet(); $('[data-q]',L).onclick=()=>{ quit=true; done=true; clearInterval(timer); GPS.stop(); go('main',{tab:'home'},'back'); }; }}); };
+  return ()=>{ done=true; clearInterval(timer); clearInterval(cd); GPS.stop(); keepAwake(false); };
 };
 
 /* =====================================================================
    COMEMORAÇÕES: fim de treino → acender ofensiva → turma volta
    ===================================================================== */
 const CHEERS=['Você é imparável!','Mais um passo rumo à meta!','A turma tá orgulhosa de você!','Corpo agradece, mente também!','Isso é que é dedicação!'];
-SCREENS.fim=(p,el)=>{ const {stats,res}=p; const P=st.profile;
+SCREENS.fim=(p,el)=>{ const {stats,res}=p; const P=st.profile; const hasRoute=pathPoints(stats.path)>1;
   const cards=[['TOTAL DE XP','#ffc800',`${IC.bolt}${stats.xp}`],['TEMPO','#1cb0f6',mmss(stats.secs)],['KCAL','#ff9600',`${IC.flame(true)}${Math.round(stats.kcal)}`]];
   if(stats.km>0.01) cards.push(['DISTÂNCIA','#ff6fa3',`${fmtKm(stats.km*1000)} km`]);
-  el.innerHTML=`<div class="celebrate"><div class="band"><div class="axo-slot" ${axo({id:P.partner,anim:'cheer',mood:'joy'},'tall')}></div></div>
-    <div class="cel-title">${p.free?'Atividade concluída!':'Treino concluído!'}</div><div class="cel-sub">${CHEERS[Math.floor(Math.random()*CHEERS.length)]}</div>
-    <div class="statcards">${cards.map(([t,k,v],i)=>`<div class="sc" style="--k:${k};--i:${i}"><small>${t}</small><b>${v}</b></div>`).join('')}</div></div>
+  if(stats.km>0.05) cards.push(['RITMO /KM','#ce82ff',mmss(stats.secs/stats.km)]);
+  const hero = hasRoute
+    ? `<div class="fim-map"><div data-map></div><div class="fim-axo"><div class="axo-slot" ${axo({id:P.partner,anim:'cheer',mood:'joy'},'tall')}></div></div></div>`
+    : `<div class="band"><div class="axo-slot" ${axo({id:P.partner,anim:'cheer',mood:'joy'},'tall')}></div></div>`;
+  el.innerHTML=`<div class="scroll"><div class="celebrate ${hasRoute?'with-map':''}">${hero}
+    <div class="cel-title">${p.free?'Atividade concluída!':'Treino concluído!'}</div><div class="cel-sub">${hasRoute?'Olha só o caminho que você fez!':CHEERS[Math.floor(Math.random()*CHEERS.length)]}</div>
+    <div class="statcards">${cards.map(([t,k,v],i)=>`<div class="sc" style="--k:${k};--i:${i}"><small>${t}</small><b>${v}</b></div>`).join('')}</div></div></div>
     <div class="foot"><button class="btn" data-next>Receber XP</button></div>`;
+  let map=null, t1=null;
+  if(hasRoute){ map=new MiniMap($('[data-map]',el)); t1=setTimeout(()=>map.fit(stats.path),420); }
   SFX.win(); vib([40,60,40]);
-  setTimeout(()=>{ cards.forEach((_,i)=>setTimeout(()=>SFX.pop(),800+i*350)); },0);
+  const ts=cards.map((_,i)=>setTimeout(()=>{ if(el.isConnected) SFX.pop(); },800+i*350));
   $('[data-next]',el).onclick=()=>{ SFX.ok(); afterFim(p,'fim'); };
+  return ()=>{ clearTimeout(t1); ts.forEach(clearTimeout); map&&map.destroy(); };
 };
+function fakeRun(){ const c=[-23.5874,-46.6576], path=[]; let dist=0;
+  for(let k=0;k<=220;k++){ const a=k/220*Math.PI*2, r=1+0.18*Math.sin(a*3)+0.08*Math.cos(a*7);
+    const q=[c[0]+0.0034*r*Math.sin(a), c[1]+0.0046*r*Math.cos(a)]; if(path.length) dist+=haversine(path[path.length-1],q); path.push(q); }
+  const secs=Math.round(dist/2.7);
+  return {secs,kcal:Math.round(8*st.profile.weight*secs/3600),km:dist/1000,xp:Math.round(secs/60)+5,path,title:'Corrida (simulação)'}; }
 function afterFim(p,from){
   const {res}=p;
   if(from==='fim' && res.first) return go('acender',p,'fade');
@@ -766,32 +833,63 @@ SCREENS.trofeu=(p,el)=>{ const n=allNodes().find(x=>x.id===p.nodeId); const u=pl
    ABA CORRER — corrida/caminhada livre com GPS e cronômetro
    ===================================================================== */
 const RUN_MODES=[{id:'caminhada',e:'🚶',t:'Caminhada',s:'Ritmo confortável',anim:'march',met:3.8},{id:'trote',e:'🏃',t:'Trote leve',s:'Corridinha tranquila',anim:'run:0.7',met:7},{id:'corrida',e:'🔥',t:'Corrida',s:'Bora acelerar',anim:'run',met:9.8}];
+function actRow(a){ const d=new Date(a.ts);
+  return `<button class="act" data-act="${a.id}"><span class="act-ic">${pathPoints(a.path)>1?'🗺️':a.kind==='treino'?'💪':'🏃'}</span><span class="t"><b>${esc(a.title)}</b><span>${d.toLocaleDateString('pt-BR',{day:'2-digit',month:'short'})} · ${mmss(a.secs)}${a.km>0.01?` · ${fmtKm(a.km*1000)} km`:''}</span></span><span class="act-xp">+${a.xp} XP</span></button>`; }
+function bindActs(root){ $$('[data-act]',root).forEach(b=>b.onclick=()=>{ const a=st.acts.find(x=>x.id===b.dataset.act); if(a){ SFX.tap(); actSheet(a); } }); }
+function actSheet(a){ const d=new Date(a.ts), has=pathPoints(a.path)>1; let map=null, t1=null;
+  openSheet(`<div class="sh-head"><h2>${esc(a.title)}</h2><p>${d.toLocaleDateString('pt-BR',{weekday:'long',day:'numeric',month:'long'})}, ${d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</p></div>
+    <div class="scroll">${has?'<div class="sheet-map" data-map></div>':''}
+      <div class="gps four"><div><b>${mmss(a.secs)}</b><span>tempo</span></div><div><b>${a.km>0.01?fmtKm(a.km*1000):'—'}</b><span>km</span></div><div><b>${a.km>0.05?mmss(a.secs/a.km):'--:--'}</b><span>ritmo</span></div><div><b>${a.kcal}</b><span>kcal</span></div></div>
+      ${!has&&a.km<0.01&&a.kind==='livre'?'<p class="note">Sem percurso gravado: o GPS não estava disponível nessa atividade.</p>':''}<div style="height:10px"></div></div>
+    <div class="foot line"><button class="btn outline" data-x>Fechar</button></div>`,
+    {onClose:()=>{ clearTimeout(t1); map&&map.destroy(); },
+     mount:L=>{ $('[data-x]',L).onclick=()=>closeSheet(); if(has){ map=new MiniMap($('[data-map]',L)); t1=setTimeout(()=>map.fit(a.path),380); } }});
+}
 function tabRun(v){
   const care=plan.care; let mode=care?'caminhada':'trote';
-  v.innerHTML=`<div class="scroll"><div class="tab-title">Correr</div><div class="tab-sub">Caminhada ou corrida livre, cronometrada e medida pelo GPS do celular.</div>
+  const runs=st.acts.filter(a=>a.kind==='livre'||a.km>0.01).slice(0,4);
+  v.innerHTML=`<div class="scroll"><div class="tab-title">Correr</div><div class="tab-sub">Caminhada ou corrida livre: cronômetro, distância e o seu caminho no mapa.</div>
     <div class="run-hero"><div class="axo-slot" ${axo({id:coachFor('turbo'),anim:'run:0.7',ry:0.9},'full',{oy:-0.1})}></div></div>
     <div class="pad" style="margin-top:14px">${optsHTML(RUN_MODES.map(m=>({v:m.id,e:m.e,t:m.t,s:care&&m.id!=='caminhada'?'Indisponível no Modo Cuidado':m.s})),mode)}
-    <div class="tipbox">🐢 <span>Termine com 3–5 min de trote regenerativo bem leve. Ajuda a limpar o ácido lático e evita câimbras.</span></div><div style="height:20px"></div></div></div>
+    <div class="tipbox">🐢 <span>Termine com 3–5 min de trote regenerativo bem leve. Ajuda a limpar o ácido lático e evita câimbras.</span></div>
+    ${runs.length?`<h3 class="sec-h">Últimas atividades</h3><div class="acts">${runs.map(actRow).join('')}</div>`:''}<div style="height:20px"></div></div></div>
     <div class="foot line"><button class="btn blue" data-go>Iniciar</button></div>`;
   $$('.opt',v).forEach(b=>b.onclick=()=>{ if(care&&b.dataset.v!=='caminhada'){ toast('No Modo Cuidado, vamos de caminhada ❤️'); return; } mode=b.dataset.v; $$('.opt',v).forEach(x=>x.classList.toggle('sel',x===b)); const m=RUN_MODES.find(x=>x.id===mode); setAxo($('.run-hero .axo-slot',v),{id:coachFor('turbo'),anim:m.anim,ry:0.9},'full',{oy:-0.1}); SFX.pop(); });
   $('[data-go]',v).onclick=()=>{ SFX.ok(); go('livre',{mode},'up'); };
+  bindActs(v);
 }
-SCREENS.livre=({mode},el)=>{ const m=RUN_MODES.find(x=>x.id===mode), P=st.profile; let secs=0, paused=false, kcal=0, lastT=performance.now();
-  GPS.reset(); GPS.start();
-  el.innerHTML=`<div class="pl-top"><span style="font-weight:900;font-size:18px;white-space:nowrap">${m.e} ${m.t}</span><div class="gps-status" style="flex:1;justify-content:flex-end;text-align:right"><i></i><span></span></div></div>
-    <div class="scroll"><div class="run-hero" style="margin-top:8px"><div class="axo-slot" ${axo({id:coachFor('turbo'),anim:m.anim,ry:0.9},'full',{oy:-0.1})}></div></div>
-    <div class="run-big" data-t>0:00</div><small>TEMPO</small>
-    <div class="pad"><div class="gps"><div><b data-km>0,00</b><span>km</span></div><div><b data-pace>--:--</b><span>ritmo /km</span></div><div><b data-kc>0</b><span>kcal</span></div></div>
-    <p class="note" style="text-align:center">Mantenha o app aberto durante a atividade pra medir a distância.</p></div></div>
-    <div class="foot"><div class="pl-ctrl"><button class="btn outline sq" data-pause>${IC.pause}</button><button class="btn red" data-end>Finalizar</button></div></div>`;
-  const t=setInterval(()=>{ const now=performance.now(), dt=(now-lastT)/1000; lastT=now; const gs=$('.gps-status',el); gs.className='gps-status '+GPS.cls(); $('span',gs).textContent=GPS.label();
-    if(paused) return; secs+=dt; kcal+=m.met*P.weight*dt/3600;
+SCREENS.livre=({mode},el)=>{ const m=RUN_MODES.find(x=>x.id===mode), P=st.profile; let secs=0, paused=false, kcal=0, lastT=Date.now(), done=false;
+  GPS.reset(); GPS.start(); keepAwake(true);
+  el.innerHTML=`<div class="pl-top lv-top"><button class="icon-btn" data-x aria-label="Sair">${IC.close}</button><span class="lv-title">${m.e} ${m.t}</span><div class="gps-status"><i></i><span></span></div></div>
+    <div class="lv-map"><div data-map></div><div class="lv-axo"><div class="axo-slot" ${axo({id:coachFor('turbo'),anim:m.anim,ry:0.9},'full')}></div></div></div>
+    <div class="lv-body"><div class="run-big" data-t>0:00</div><small class="run-lbl">TEMPO</small>
+      <div class="gps"><div><b data-km>0,00</b><span>km</span></div><div><b data-pace>--:--</b><span>ritmo /km</span></div><div><b data-kc>0</b><span>kcal</span></div></div>
+      <p class="note" data-note></p></div>
+    <div class="foot"><div class="pl-ctrl"><button class="btn outline sq" data-pause aria-label="Pausar">${IC.pause}</button><button class="btn red" data-end>Finalizar</button></div></div>`;
+  const map=new MiniMap($('[data-map]',el),{zoom:17});
+  const ui=()=>{ const gs=$('.gps-status',el); gs.className='gps-status '+GPS.cls(); $('span',gs).textContent=GPS.label();
     $('[data-t]',el).textContent=mmss(secs); $('[data-km]',el).textContent=fmtKm(GPS.dist); $('[data-kc]',el).textContent=Math.round(kcal);
-    $('[data-pace]',el).textContent=GPS.dist>50?mmss(secs/(GPS.dist/1000)):'--:--'; },250);
-  $('[data-pause]',el).onclick=e=>{ paused=!paused; GPS.setPaused(paused); e.currentTarget.innerHTML=paused?IC.play:IC.pause; setAxo($('.axo-slot',el),{id:coachFor('turbo'),anim:paused?'idle':m.anim,ry:paused?0:0.9},'full',{oy:-0.1}); SFX.tap(); };
-  $('[data-end]',el).onclick=()=>{ if(secs<10){ clearInterval(t); GPS.stop(); go('main',{tab:'run'},'back'); return; }
-    clearInterval(t); GPS.stop(); const stats={secs,kcal,km:GPS.dist/1000,xp:Math.max(5,Math.round(secs/60)+5)}; const res=recordActivity(stats); go('fim',{stats,res,free:true},'fade'); };
-  return ()=>{ clearInterval(t); GPS.stop(); };
+    $('[data-pace]',el).textContent=GPS.dist>50?mmss(secs/(GPS.dist/1000)):'--:--';
+    map.message(GPS.cur?'':(GPS.status==='wait'||GPS.status==='off'?'Procurando sua localização…':GPS.hint()));
+    $('[data-note]',el).textContent=GPS.status==='ok'?(NATIVE?'Pode bloquear a tela: o AxoGo continua registrando seu caminho.':'Mantenha esta tela aberta pra medir a distância.'):'';
+    map.live(GPS.path,GPS.cur); };
+  const t=setInterval(()=>{ const now=Date.now(), dt=Math.max(0,(now-lastT)/1000); lastT=now;
+    if(!paused&&!done){ secs+=dt; kcal+=m.met*P.weight*dt/3600; } ui(); },500);
+  ui();
+  const leave=()=>{ done=true; clearInterval(t); GPS.stop(); keepAwake(false); };
+  const end=()=>{ if(done) return;
+    if(secs<10){ leave(); toast('Atividade curtinha demais pra salvar 😉'); go('main',{tab:'run'},'back'); return; }
+    leave(); const stats={secs,kcal,km:GPS.dist/1000,xp:Math.max(5,Math.round(secs/60)+5),path:GPS.path.slice(),title:m.t};
+    const res=recordActivity(stats); go('fim',{stats,res,free:true},'fade'); };
+  $('[data-pause]',el).onclick=e=>{ if(done) return; paused=!paused; lastT=Date.now(); GPS.setPaused(paused); e.currentTarget.innerHTML=paused?IC.play:IC.pause;
+    setAxo($('.lv-axo .axo-slot',el),{id:coachFor('turbo'),anim:paused?'idle':m.anim,ry:paused?0.3:0.9},'full'); SFX.tap(); toast(paused?'Pausado ⏸':'Bora! ▶️'); };
+  $('[data-end]',el).onclick=()=>{ SFX.ok(); end(); };
+  $('[data-x]',el).onclick=()=>{ if(done||sheetEl) return; SFX.tap();
+    openSheet(`<div class="sh-head" style="text-align:center"><h2>Encerrar a atividade?</h2><p>${secs<10?'Ela ainda está muito curta e não será salva.':'Posso salvar o que você já fez.'}</p></div>
+      <div class="foot"><button class="btn" data-k>Continuar</button>${secs>=10?'<button class="btn outline" data-s>Finalizar e salvar</button>':''}<button class="btn link" style="color:var(--red)" data-q>Sair sem salvar</button></div>`,
+      {mount:L=>{ $('[data-k]',L).onclick=()=>closeSheet(); const sv=$('[data-s]',L); if(sv) sv.onclick=()=>{ closeSheet(true); end(); };
+        $('[data-q]',L).onclick=()=>{ leave(); go('main',{tab:'run'},'back'); }; }}); };
+  return ()=>{ done=true; clearInterval(t); GPS.stop(); keepAwake(false); map.destroy(); };
 };
 
 /* =====================================================================
@@ -813,7 +911,7 @@ function crewSheet(id){ const c=CREW[id], gone=st.fled.includes(id);
       `<div style="height:260px;border-radius:20px;background:${c.color}44;position:relative"><div class="axo-slot" style="position:absolute;inset:0" ${axo({id,anim:'wave'},'tall')}></div></div>
       <p style="font-weight:700;color:#666;margin:12px 2px">${c.bio}</p><div class="chips">${acts.map(([a,t])=>`<button class="chip" data-a="${a}">${t}</button>`).join('')}</div>`}<div style="height:12px"></div></div>
     <div class="foot line"><button class="btn outline" data-x>Fechar</button></div>`,
-    {mount:L=>{ $('[data-x]',L).onclick=()=>closeSheet(); $$('[data-a]',L).forEach(b=>b.onclick=()=>{ const a=b.dataset.a; $$('[data-a]',L).forEach(x=>x.classList.toggle('sel',x===b)); SFX.pop(); const ex=a==='pushup'; setAxo($('.axo-slot',L),{id,anim:a,mood:a==='cheer'||a==='dance'?'joy':'happy',ry:ex?-1.2:0},ex?'low':'tall'); }); }});
+    {mount:L=>{ $('[data-x]',L).onclick=()=>closeSheet(); $$('[data-a]',L).forEach(b=>b.onclick=()=>{ const a=b.dataset.a; $$('[data-a]',L).forEach(x=>x.classList.toggle('sel',x===b)); SFX.pop(); const ex=a==='pushup'; setAxo($('.axo-slot',L),{id,anim:a,mood:a==='cheer'||a==='dance'?'joy':'happy',ry:ex?-1.45:0},ex?'low':'tall'); }); }});
 }
 
 /* =====================================================================
@@ -838,11 +936,16 @@ function tabQuest(v){
 function tabMe(v){
   const P=st.profile, pl=plan; const tot=Object.values(st.history).reduce((a,h)=>({w:a.w+(h.workouts||0),km:a.km+(h.km||0),kcal:a.kcal+(h.kcal||0)}),{w:0,km:0,kcal:0});
   const since=st.startDate?parseK(st.startDate).toLocaleDateString('pt-BR',{month:'long',year:'numeric'}):'';
-  v.innerHTML=`<div class="scroll" data-clip>
+  let info={}; try{ info=JSON.parse(nat('info')||'{}'); }catch(e){}
+  const webV=info.web||WEBV;
+  const acts=st.acts.slice(0,v._allActs?40:5);
+  v.innerHTML=`<div class="scroll">
    <div class="prof-head"><div class="av" style="--pc:${CREW[P.partner].color}66"><div class="axo-slot" ${axo({id:P.partner,anim:'idle'},'head')}></div></div><div><h2>${esc(P.name)}</h2><p>No AxoGo desde ${since}</p><p>Parceiro: <b style="color:${CREW[P.partner].dark}">${cname(P.partner)}</b></p></div></div>
    <div class="sgrid"><div class="sbox">${IC.flame(true)}<div><b>${streak()}</b><span>Ofensiva</span></div></div><div class="sbox">${IC.bolt}<div><b>${st.xp}</b><span>Total de XP</span></div></div>
      <div class="sbox">${IC.dumbbell.replace(/#fff/g,'#ce82ff')}<div><b>${tot.w}</b><span>Treinos</span></div></div><div class="sbox">${IC.pin}<div><b>${tot.km.toFixed(1).replace('.',',')}</b><span>km</span></div></div></div>
-   <div class="sect"><h3>Seu plano</h3><div class="card">
+   <div class="sect"><h3>Atividades</h3>
+     ${acts.length?`<div class="acts">${acts.map(actRow).join('')}</div>${st.acts.length>5&&!v._allActs?'<button class="btn link" data-more>Ver todas</button>':''}`:'<div class="card"><p class="note" style="margin:0">Seus treinos e corridas aparecem aqui, com o mapa do percurso.</p></div>'}
+   <h3>Seu plano</h3><div class="card">
      <div class="rowi">Objetivo<span>${GOALS[P.goal]?.emoji} ${GOALS[P.goal]?.label}</span></div>
      <div class="rowi">Nível<span>${pl.levelName}</span></div>
      <div class="rowi">Dias de treino<span>${P.days.slice().sort().map(d=>DNL[d]).join(', ')}</span></div>
@@ -852,20 +955,64 @@ function tabMe(v){
      ${pl.joints.length?`<div class="rowi">Adaptado para<span>${pl.joints.map(j=>JOINTS.find(x=>x.id===j).label).join(', ')}</span></div>`:''}
      <button class="btn outline sm" style="margin-top:12px" data-redo>Refazer o questionário</button></div>
    <h3>Configurações</h3><div class="card">
-     <div class="rowi">Lembrete diário<input type="time" class="field" style="width:120px;height:42px;font-size:16px" value="${P.reminder}" data-rem></div>
+     <div class="rowi">Lembrete de treino<button class="switch ${st.remOn!==false?'on':''}" data-rem-on aria-label="Lembrete"></button></div>
+     <div class="rowi">Horário do lembrete<input type="time" class="field" style="width:150px;height:42px;font-size:16px;padding:0 10px" value="${P.reminder}" data-rem></div>
+     ${NATIVE?'':'<p class="note" style="margin:2px 0 8px">As notificações de lembrete funcionam no app instalado.</p>'}
      <div class="rowi">Sons<button class="switch ${st.sound?'on':''}" data-snd aria-label="Sons"></button></div>
      <div class="rowi">Meta de ofensiva<span>${P.streakGoal} dias</span></div></div>
+   <h3>Sobre o app</h3><div class="card">
+     <div class="rowi">Versão<span>${webV?'v'+webV:'—'}${NATIVE?` · app ${info.shell||1}`:' · web'}</span></div>
+     ${NATIVE?'<button class="btn outline sm" style="margin-top:12px" data-upd>Procurar atualização</button><p class="note">O AxoGo se atualiza sozinho ao abrir. Não precisa reinstalar.</p>':''}</div>
    <h3>Demonstração</h3><div class="card demo-box"><p style="font-weight:700;font-size:14px;color:#7a6500">Simule dias passando pra ver a turma ficar feliz, triste ou fugir de casa.</p><button class="btn gold sm" data-demo>🧪 Abrir modo demo</button></div>
    <div style="height:28px"></div></div></div>`;
   $('[data-redo]',v).onclick=()=>{ SFX.tap(); lastProg=0; go('objetivo',{},'fwd'); };
-  $('[data-rem]',v).onchange=e=>{ P.reminder=e.target.value||P.reminder; save(); toast(`Lembrete às ${P.reminder} ⏰`); };
+  $('[data-rem]',v).onchange=e=>{ P.reminder=e.target.value||P.reminder; save(); syncReminder(); toast(`Lembrete às ${P.reminder} ⏰`); };
+  $('[data-rem-on]',v).onclick=e=>{ st.remOn=!(st.remOn!==false); e.currentTarget.classList.toggle('on',st.remOn); save(); syncReminder(); SFX.tap(); toast(st.remOn?`Lembrete ligado às ${P.reminder} ⏰`:'Lembrete desligado'); };
   $('[data-snd]',v).onclick=e=>{ st.sound=!st.sound; e.currentTarget.classList.toggle('on',st.sound); save(); SFX.tap(); };
   $('[data-demo]',v).onclick=()=>{ SFX.tap(); demoSheet(); };
+  const more=$('[data-more]',v); if(more) more.onclick=()=>{ v._allActs=true; const y=$('.scroll',v).scrollTop; tabMe(v); $('.scroll',v).scrollTop=y; };
+  const upd=$('[data-upd]',v); if(upd) upd.onclick=()=>{ SFX.tap(); manualCheck=true; toast('Procurando atualização…'); nat('checkUpdate'); };
+  bindActs(v);
 }
 
 /* =====================================================================
-   INÍCIO
+   INÍCIO: lembretes, atualização remota, botão voltar do Android
    ===================================================================== */
-document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible'&&st.onboarded&&cur?.name==='main'){ const nw=syncDay(); if(nw.length) go('fuga',{ids:nw},'fade'); } });
+function syncReminder(){ if(!NATIVE||!st.onboarded) return;
+  const [h,m]=String(st.profile.reminder||'18:00').split(':').map(Number);
+  nat('setReminder',h||0,m||0,st.profile.days.join(','),`Hora do treino, ${st.profile.name.trim()}! 🔥`,
+    `${cname(st.profile.partner)} e a turma estão te esperando. Bora manter a ofensiva?`,st.remOn!==false); }
+
+let WEBV=null, pendingUpdate=null, manualCheck=false;
+try{ fetch('./manifest.json').then(r=>r.ok?r.json():null).then(m=>{ if(m) WEBV=m.version; }).catch(()=>{}); }catch(e){}
+function maybeApplyUpdate(){ if(!pendingUpdate||!NATIVE||!cur||sheetEl) return;
+  if(cur.name==='splash'){ pendingUpdate=null; nat('reload'); return; }
+  if(cur.name==='main'||cur.name==='welcome'){ const v=pendingUpdate; pendingUpdate=null; toast(`✨ Atualização v${v} instalada!`); setTimeout(()=>nat('reload'),1500); } }
+window.addEventListener('axogo-update',e=>{ const d=e.detail||{};
+  if(d.status==='ready'){ pendingUpdate=d.version; manualCheck=false; maybeApplyUpdate(); return; }
+  if(!manualCheck) return;
+  if(d.status==='none') toast('Você já está na versão mais recente ✅');
+  else if(d.status==='downloading'){ toast(`Baixando a versão ${d.version}…`); return; }
+  else if(d.status==='busy') toast('Já estou procurando…');
+  else if(d.status==='shell') toast('Essa atualização precisa de um APK novo.');
+  else if(d.status==='error') toast('Não consegui checar agora. Confira a internet.');
+  manualCheck=false; });
+
+// Botão "voltar" do Android: fecha folha → volta uma tela → sai do treino → volta pra Trilha → sai do app
+window.AxoGoBack=()=>{
+  if(sheetEl){ closeSheet(); return true; }
+  if(!cur) return false;
+  const b=$('[data-back]',cur.el)||$('.pl-top [data-x]',cur.el);
+  if(b){ b.click(); return true; }
+  if(cur.name==='main'){ const pop=$('.pop',cur.el); if(pop){ pop.remove(); return true; }
+    if(tab!=='home'){ $('.nav [data-tab=home]',cur.el).click(); return true; } return false; }
+  return !['splash','welcome'].includes(cur.name);
+};
+
+function onVisible(){ if(!st.onboarded||!cur) return; if(GPS.on) GPS.pump();
+  if(cur.name==='main'){ const nw=syncDay(); if(nw.length) go('fuga',{ids:nw},'fade'); else { renderTopbar(); maybeApplyUpdate(); } } }
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') onVisible(); });
+window.addEventListener('axogo-resume',onVisible);
+if(st.onboarded) syncReminder();
 go('splash',{},'none');
-window.AxoGo={st,stage,go,plan:()=>plan};
+window.AxoGo={st,stage,go,plan:()=>plan,GPS};

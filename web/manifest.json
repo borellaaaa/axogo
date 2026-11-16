@@ -1,32 +1,37 @@
 {
- "version": 1,
+ "version": 3,
  "minShell": 1,
- "notes": "Primeira versão",
+ "notes": "Correções gerais, animações novas e mapa da corrida",
  "files": [
   {
    "path": "app.js",
-   "sha256": "74b08f0746c32ec2e82c0d3e8db476e1ea0cb60cfaa865e5fab0ce9b14c02024",
-   "size": 88351
+   "sha256": "c7b87ef6888e690f33f932d6b2e0dd90047efacd352364b1993b78d40bd5b35a",
+   "size": 101419
   },
   {
    "path": "axo3d.js",
-   "sha256": "2d91185c452c4cfa7ae12cb0b78998e950ce92ce8426f65832b351b2cd032c6f",
-   "size": 38882
+   "sha256": "3015825253b3f05c61e065204119ee8799b93aed9dcc3bbb4d125f462fde5893",
+   "size": 41438
   },
   {
    "path": "index.html",
-   "sha256": "7af08491527211b717f2d410f4459f99ef04b985dbc84473c58f5bac60ff3bcb",
-   "size": 507
+   "sha256": "c9dd1082cbaa2fe5d52da983f3346ce38474453f847059ec98f98fc7564e0aef",
+   "size": 476
+  },
+  {
+   "path": "map.js",
+   "sha256": "5583a2a44da21fdaf07c25eb64836de178d93a17cb4bc5f189e138e6b12e2be7",
+   "size": 7800
   },
   {
    "path": "plan.js",
-   "sha256": "8c6a4d92d8ce3b677247ea5e530f92f0cea57383768a4646ac6f2d15ec46d782",
-   "size": 16661
+   "sha256": "335fb7c2c91b2ae50ae70f68e648e14a66aa08ed3bc09dd2a92a80da7867d71b",
+   "size": 16665
   },
   {
    "path": "styles.css",
-   "sha256": "8875c649ee23c713567efd098a2d81e1fe0451a0d38737ae7df88ee8cd9d6c78",
-   "size": 93659
+   "sha256": "f410428960ceb69fe097433260f52a79292b18924febddb0908f26936b70dded",
+   "size": 98592
   },
   {
    "path": "img/icon-192.png",

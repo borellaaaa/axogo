@@ -1,11 +1,8 @@
 name: Build APK
 
+# Só roda manualmente (aba Actions → Build APK → Run workflow).
+# O APK oficial é gerado por tools/build_apk.py e fica em dist/AxoGo.apk.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'android/**'
-      - '.github/workflows/build-apk.yml'
   workflow_dispatch:
 
 permissions:
