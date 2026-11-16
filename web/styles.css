@@ -540,3 +540,20 @@ input[type=range]::-moz-range-thumb{width:26px;height:26px;border-radius:50%;bac
 .act b{display:block;font-weight:900;font-size:15.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .act .t span{font-weight:700;font-size:13px;color:var(--mute)}
 .act-xp{font-weight:900;font-size:13px;color:var(--gold-d);white-space:nowrap}
+
+/* ---------- conta / Google ---------- */
+.btn.google{background:#fff;color:#3c4043;border:2px solid var(--line);box-shadow:0 4px 0 var(--line);letter-spacing:.04em}
+.btn.google:active{box-shadow:0 0 0 var(--line)}
+.btn.google svg{width:22px;height:22px}
+.acct{margin-top:4px}
+.acct-h{display:block;font-weight:900;font-size:16px}
+.acct-row{display:flex;align-items:center;gap:12px}
+.acct-row>svg{width:28px;height:28px;flex:none}
+.acct-av{width:46px;height:46px;border-radius:50%;flex:none;object-fit:cover;border:2px solid var(--line)}
+.acct-t{flex:1;min-width:0}
+.acct-t b{display:block;font-weight:900;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acct-t span{display:block;font-weight:700;font-size:13px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acct-st{font-weight:800;font-size:13px;color:var(--green-d);margin:10px 0 10px}
+.acct-st.syncing{color:var(--blue-d)} .acct-st.offline,.acct-st.error{color:var(--orange-d)}
+.acct-btns{display:flex;gap:8px}
+.acct-btns .btn{flex:1}

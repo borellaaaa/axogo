@@ -45,7 +45,7 @@ public class MainActivity extends Activity {
     static final String TAG = "AxoGo";
     static final String HOST = "appassets.androidplatform.net";
     static final String BASE = "https://" + HOST + "/";
-    static final int SHELL = 1;
+    static final int SHELL = 2;
     static final int REQ_LOC = 11;
     static final int REQ_NOTIF = 12;
 
@@ -53,6 +53,7 @@ public class MainActivity extends Activity {
     Updater updater;
     boolean pendingTrack;
     long lastCheck;
+    volatile String pendingAuth;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -85,6 +86,39 @@ public class MainActivity extends Activity {
 
         lastCheck = System.currentTimeMillis();
         updater.checkAsync(false);
+        takeAuth(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        takeAuth(intent);
+    }
+
+    /** Guarda o retorno do login (com.axogo.app://auth?...) e avisa o app web. */
+    void takeAuth(Intent intent) {
+        if (intent == null || intent.getData() == null) return;
+        Uri u = intent.getData();
+        if (!"com.axogo.app".equals(u.getScheme()) || !"auth".equals(u.getHost())) return;
+        pendingAuth = u.toString();
+        intent.setData(null);
+        emit("axogo-auth", "{\"url\":" + JSONObject.quote(pendingAuth) + "}");
+    }
+
+    /** Abre um link fora do app: Custom Tab do Chrome se houver, senão o navegador padrão. */
+    void openOutside(String url) {
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            Bundle extras = new Bundle();
+            extras.putBinder("android.support.customtabs.extra.SESSION", null);
+            i.putExtras(extras);
+            i.putExtra("android.support.customtabs.extra.TOOLBAR_COLOR", Color.rgb(0xFF, 0x6F, 0xA3));
+            i.putExtra("android.support.customtabs.extra.SHARE_STATE", 2);
+            startActivity(i);
+        } catch (Throwable t) {
+            try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); } catch (Throwable ignored) { }
+        }
     }
 
     @Override
@@ -241,9 +275,7 @@ public class MainActivity extends Activity {
         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
             Uri u = request.getUrl();
             if (u != null && HOST.equalsIgnoreCase(u.getHost())) return false;
-            try {
-                startActivity(new Intent(Intent.ACTION_VIEW, u));
-            } catch (Throwable t) { Log.w(TAG, "open url", t); }
+            if (u != null) openOutside(u.toString());
             return true;
         }
     }
@@ -354,6 +386,19 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void markTrained(String dayKey) {
             getSharedPreferences("axogo", MODE_PRIVATE).edit().putString("trained", dayKey == null ? "" : dayKey).apply();
+        }
+
+        @JavascriptInterface
+        public void openExternal(final String url) {
+            if (url == null || !(url.startsWith("https://") || url.startsWith("http://"))) return;
+            runOnUiThread(new Runnable() { @Override public void run() { openOutside(url); } });
+        }
+
+        @JavascriptInterface
+        public String pendingAuth() {
+            String p = pendingAuth;
+            pendingAuth = null;
+            return p;
         }
 
         @JavascriptInterface

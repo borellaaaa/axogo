@@ -1,5 +1,6 @@
 import { AxoStage, CREW, CREW_IDS } from './axo3d.js';
 import { MiniMap, haversine, simplifyPath, pathPoints } from './map.js';
+import { cloud } from './cloud.js';
 
 // Ponte com a casca Android (existe só dentro do APK). No navegador tudo cai nos equivalentes web.
 const NATIVE = (typeof window.AxoNative !== 'undefined') ? window.AxoNative : null;
@@ -47,6 +48,8 @@ const IC={
   navCrew:`<svg viewBox="0 0 32 32"><g fill="#ff8fb1" stroke="#2b201b" stroke-width="1.3"><ellipse cx="5" cy="10" rx="4" ry="1.9" transform="rotate(-35 5 10)"/><ellipse cx="3.6" cy="16" rx="3.6" ry="1.8"/><ellipse cx="27" cy="10" rx="4" ry="1.9" transform="rotate(35 27 10)"/><ellipse cx="28.4" cy="16" rx="3.6" ry="1.8"/></g><ellipse cx="16" cy="17" rx="10.5" ry="9" fill="#ffc2d4" stroke="#2b201b" stroke-width="2"/><circle cx="12" cy="16" r="1.7" fill="#2b201b"/><circle cx="20" cy="16" r="1.7" fill="#2b201b"/><path d="M13.5 20q2.5 2.2 5 0" stroke="#2b201b" stroke-width="1.7" fill="none" stroke-linecap="round"/></svg>`,
   navQuest:`<svg viewBox="0 0 32 32"><path d="M4 14h24v11a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3z" fill="#ffc800"/><path d="M5 12c0-5 5-8 11-8s11 3 11 8v2H5z" fill="#ffd84d"/><rect x="3" y="12.5" width="26" height="3.5" rx="1.5" fill="#e5a400"/><rect x="13" y="12" width="6" height="7" rx="2" fill="#fff" stroke="#e5a400" stroke-width="1.6"/></svg>`,
   navMe:`<svg viewBox="0 0 32 32"><circle cx="16" cy="11.5" r="6" fill="#ce82ff"/><path d="M5 28c1-6 5.5-9 11-9s10 3 11 9z" fill="#ce82ff"/></svg>`,
+  google:`<svg viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>`,
+  cloudOk:`<svg viewBox="0 0 24 24"><path d="M7 19h10.5a4.5 4.5 0 0 0 .6-8.96A6 6 0 0 0 6.5 9.5 4.75 4.75 0 0 0 7 19z" fill="#1cb0f6"/><path d="M9 13.6l2.1 2.1 4-4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   bars:n=>`<svg viewBox="0 0 30 30">${[0,1,2,3].map(i=>`<rect x="${3+i*6.6}" y="${21-i*5}" width="5" height="${6+i*5}" rx="1.6" fill="${i<n?'#ff6fa3':'#e5e5e5'}"/>`).join('')}</svg>`,
 };
 const NODE_IC={dumbbell:IC.dumbbell,shoe:IC.shoe,walk:IC.walk,leaf:IC.leaf,star:IC.star};
@@ -76,8 +79,13 @@ let st; try{ st=Object.assign(DEF(),JSON.parse(localStorage.getItem(KEY)||'{}'))
 st.profile=Object.assign(DEF().profile,st.profile||{});
 if(!Array.isArray(st.acts)) st.acts=[];
 function trimActs(keepPaths=30){ st.acts=st.acts.slice(0,80); st.acts.forEach((a,i)=>{ if(i>=keepPaths) delete a.path; }); }
-const save=()=>{ try{ localStorage.setItem(KEY,JSON.stringify(st)); }
+const rawSave=()=>{ try{ localStorage.setItem(KEY,JSON.stringify(st)); }
   catch(e){ try{ trimActs(5); localStorage.setItem(KEY,JSON.stringify(st)); }catch(e2){} } };
+// o que vai pra nuvem (o resto é só deste aparelho)
+const LOCAL_ONLY=new Set(['dayOffset','sound','acts','cloudUid','remoteAt','syncedHash','syncedAt']);
+function syncState(){ const o={}; for(const k in st) if(!LOCAL_ONLY.has(k)) o[k]=st[k]; return o; }
+function hashOf(str){ let h=2166136261; for(let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,16777619); } return (h>>>0).toString(36)+':'+str.length; }
+const save=()=>{ rawSave(); scheduleSync(); };
 let plan = st.onboarded ? genPlan(st.profile) : null;
 
 const DAY=864e5;
@@ -210,11 +218,12 @@ SCREENS.splash=(p,el)=>{
 };
 SCREENS.welcome=(p,el)=>{
   el.innerHTML=`<div class="welcome">
-    <div class="axo-slot" ${axo([{id:'turbo',anim:'happy',x:-2.5,z:-0.9,ry:0.3},{id:'lua',anim:'happy',x:2.5,z:-0.9,ry:-0.3},{id:'sol',anim:'idle',x:-0.95,z:0,ry:0.12},{id:'rex',anim:'wave',x:0.95,z:0.2,ry:-0.12}],'full',{zoom:1.32})}></div>
+    <div class="axo-slot" ${axo([{id:'turbo',anim:'happy',x:-2.5,z:-0.9,ry:0.3},{id:'lua',anim:'happy',x:2.5,z:-0.9,ry:-0.3},{id:'sol',anim:'idle',x:-0.95,z:0,ry:0.12},{id:'rex',anim:'wave',x:0.95,z:0.2,ry:-0.12}],'full',{zoom:1.18})}></div>
     <div class="logo">Axo<span>Go</span></div>
     <p>Treinos rapidinhos, corridas guiadas e uma turma de axolotes torcendo por você!</p></div>
-    <div class="foot"><button class="btn" data-go>Começar</button><button class="btn outline" data-how>Como funciona?</button></div>`;
+    <div class="foot"><button class="btn" data-go>Começar</button><button class="btn outline" data-login>Já tenho uma conta</button><button class="btn link" data-how>Como funciona?</button></div>`;
   $('[data-go]',el).onclick=()=>{ SFX.ok(); go('intro1'); };
+  $('[data-login]',el).onclick=()=>{ SFX.tap(); startLogin('welcome'); };
   $('[data-how]',el).onclick=()=>{ SFX.tap(); openSheet(`<div class="sh-head"><h2>Como o AxoGo funciona</h2><p>Simples assim:</p></div>
     <div class="scroll"><div class="how">
       <div class="card"><div class="e">🗺️</div><div><b>Siga a trilha</b><span>Cada bolinha é um treino montado pro seu nível, idade e saúde.</span></div></div>
@@ -434,8 +443,17 @@ function finishOnboarding(){
   const first=!st.onboarded;
   st.onboarded=true; if(!st.startDate) st.startDate=todayK();
   plan=genPlan(st.profile); save(); syncReminder();
-  go('main',{tab:'home',welcome:first},'fade');
+  if(first && cloud.canLogin() && !cloud.user) go('salvar',{},'fwd');
+  else go('main',{tab:'home',welcome:first},'fade');
 }
+SCREENS.salvar=(p,el)=>{ const P=st.profile;
+  el.innerHTML=`<div class="celebrate"><div class="axo-slot" style="width:100%;height:260px" ${axo([{id:'rex',anim:'happy',x:-0.95},{id:P.partner==='rex'?'lua':P.partner,anim:'wave',x:0.95}],'full')}></div>
+    <div class="cel-title" style="color:var(--ink)">Salve seu progresso!</div>
+    <div class="cel-sub">Entre com o Google e a sua ofensiva, os treinos e a turma ficam guardados na nuvem. Trocou de celular? É só entrar de novo.</div></div>
+    <div class="foot"><button class="btn google" data-g>${IC.google}Continuar com Google</button><button class="btn link" data-skip>Agora não</button></div>`;
+  $('[data-g]',el).onclick=()=>{ SFX.tap(); startLogin('salvar'); };
+  $('[data-skip]',el).onclick=()=>{ SFX.tap(); go('main',{tab:'home',welcome:true},'fade'); };
+};
 function enterApp(dir='fade'){
   const newly=syncDay();
   if(newly.length) go('fuga',{ids:newly},dir); else go('main',{tab:'home'},dir);
@@ -604,7 +622,7 @@ function demoSheet(){
      <button class="opt" data-a="sim"><span class="em">🗺️</span><span class="t">Simular uma corrida com mapa<span class="sub">Gera um percurso de exemplo pra ver o mapa no final</span></span></button>
      <button class="opt" data-a="day"><span class="em">⏭️</span><span class="t">Avançar 1 dia<span class="sub">Hoje é ${DNL[nowD().getDay()]} · ${isTrain(nowD())?'dia de treino':'dia de descanso'}</span></span></button>
      <button class="opt" data-a="skip2"><span class="em">😴</span><span class="t">Faltar 2 dias de treino<span class="sub">A turma fica triste e alguém foge</span></span></button>
-     <button class="opt" data-a="reset"><span class="em">🔄</span><span class="t">Apagar tudo e recomeçar<span class="sub">Volta pro cadastro do zero</span></span></button>
+     <button class="opt" data-a="reset"><span class="em">🔄</span><span class="t">Apagar tudo e recomeçar<span class="sub">${cloud.user?'Sai da conta e apaga deste celular (a nuvem continua salva)':'Volta pro cadastro do zero'}</span></span></button>
    </div></div><div class="foot"><button class="btn outline" data-x>Fechar</button></div>`,
    {mount:L=>{ $('[data-x]',L).onclick=()=>closeSheet();
      $$('[data-a]',L).forEach(b=>b.onclick=()=>{ const a=b.dataset.a; SFX.ok();
@@ -613,7 +631,7 @@ function demoSheet(){
        if(a==='sim'){ const stats=fakeRun(); const res=recordActivity(stats); closeSheet(true); go('fim',{stats,res,free:true},'fade'); }
        if(a==='day'){ st.dayOffset++; save(); closeSheet(true); enterApp('fade'); }
        if(a==='skip2'){ let c=0; while(c<2){ st.dayOffset++; if(isTrain(nowD())) c++; } st.dayOffset++; save(); closeSheet(true); enterApp('fade'); }
-       if(a==='reset'){ try{ localStorage.removeItem(KEY); }catch(e){} st=DEF(); plan=null; lastProg=0; go('welcome',{},'fade'); }
+       if(a==='reset'){ cloud.signOut(); try{ localStorage.removeItem(KEY); }catch(e){} st=DEF(); plan=null; lastProg=0; go('welcome',{},'fade'); }
      }); }});
 }
 
@@ -943,7 +961,7 @@ function tabMe(v){
    <div class="prof-head"><div class="av" style="--pc:${CREW[P.partner].color}66"><div class="axo-slot" ${axo({id:P.partner,anim:'idle'},'head')}></div></div><div><h2>${esc(P.name)}</h2><p>No AxoGo desde ${since}</p><p>Parceiro: <b style="color:${CREW[P.partner].dark}">${cname(P.partner)}</b></p></div></div>
    <div class="sgrid"><div class="sbox">${IC.flame(true)}<div><b>${streak()}</b><span>Ofensiva</span></div></div><div class="sbox">${IC.bolt}<div><b>${st.xp}</b><span>Total de XP</span></div></div>
      <div class="sbox">${IC.dumbbell.replace(/#fff/g,'#ce82ff')}<div><b>${tot.w}</b><span>Treinos</span></div></div><div class="sbox">${IC.pin}<div><b>${tot.km.toFixed(1).replace('.',',')}</b><span>km</span></div></div></div>
-   <div class="sect"><h3>Atividades</h3>
+   <div class="sect">${accountCard()}<h3>Atividades</h3>
      ${acts.length?`<div class="acts">${acts.map(actRow).join('')}</div>${st.acts.length>5&&!v._allActs?'<button class="btn link" data-more>Ver todas</button>':''}`:'<div class="card"><p class="note" style="margin:0">Seus treinos e corridas aparecem aqui, com o mapa do percurso.</p></div>'}
    <h3>Seu plano</h3><div class="card">
      <div class="rowi">Objetivo<span>${GOALS[P.goal]?.emoji} ${GOALS[P.goal]?.label}</span></div>
@@ -972,12 +990,127 @@ function tabMe(v){
   $('[data-demo]',v).onclick=()=>{ SFX.tap(); demoSheet(); };
   const more=$('[data-more]',v); if(more) more.onclick=()=>{ v._allActs=true; const y=$('.scroll',v).scrollTop; tabMe(v); $('.scroll',v).scrollTop=y; };
   const upd=$('[data-upd]',v); if(upd) upd.onclick=()=>{ SFX.tap(); manualCheck=true; toast('Procurando atualização…'); nat('checkUpdate'); };
-  bindActs(v);
+  bindActs(v); bindAccount(v);
 }
 
 /* =====================================================================
    INÍCIO: lembretes, atualização remota, botão voltar do Android
    ===================================================================== */
+/* ---------- NUVEM: login com Google + sincronização ---------- */
+let cloudReady=false, flushing=false, flushAgain=false, pushT=null, lastPull=0, loginFrom=null, loginSheetOpen=false;
+function scheduleSync(delay=1500){ if(!cloud.user||!cloudReady||!st.onboarded) return; clearTimeout(pushT); pushT=setTimeout(flushCloud,delay); }
+async function flushCloud(){
+  if(!cloud.user||!cloudReady||!st.onboarded) return;
+  if(flushing){ flushAgain=true; return; } flushing=true;
+  try{
+    const acts=st.acts.filter(a=>!a.synced);
+    const json=JSON.stringify(syncState()), h=hashOf(json);
+    if(acts.length||h!==st.syncedHash) cloud.setStatus('syncing');
+    if(acts.length){ await cloud.pushActs(acts); acts.forEach(a=>a.synced=true); }
+    if(h!==st.syncedHash){ st.remoteAt=await cloud.pushState(JSON.parse(json),{xp:st.xp,streak:streak(),name:st.profile.name,partner:st.profile.partner}); st.syncedHash=h; }
+    st.syncedAt=Date.now(); rawSave(); cloud.setStatus('ok');
+  }catch(e){ console.warn('sync',e); cloud.setStatus(navigator.onLine===false?'offline':'error',e.message||String(e)); }
+  finally{ flushing=false; if(flushAgain){ flushAgain=false; scheduleSync(400); } }
+}
+cloud._flush=()=>{ if(cloudReady) flushCloud(); else cloudRefresh(); };
+function mergeActs(remote){ const map=new Map(st.acts.map(a=>[a.id,a]));
+  for(const a of remote){ const l=map.get(a.id); if(l){ l.synced=true; if(!l.path&&a.path) l.path=a.path; } else map.set(a.id,a); }
+  st.acts=[...map.values()].sort((a,b)=>b.ts-a.ts); trimActs(); }
+function adoptRemote(R){
+  const keep={dayOffset:st.dayOffset,sound:st.sound,acts:st.acts};
+  st=Object.assign(DEF(),R.state||{},keep); st.profile=Object.assign(DEF().profile,(R.state||{}).profile||{});
+  st.cloudUid=cloud.user.id; st.remoteAt=R.updatedAt; st.syncedHash=hashOf(JSON.stringify(syncState())); st.syncedAt=Date.now();
+  plan=st.onboarded?genPlan(st.profile):null; rawSave(); syncReminder(); if(window.AxoGo) window.AxoGo.st=st;
+}
+function rerender(){ if(!cur) return;
+  if(!st.onboarded){ if(cur.name==='main') go('welcome',{},'fade'); return; }
+  if(cur.name==='main') go('main',{tab},'none');
+  else if(['welcome','splash','salvar','intro1','intro2'].includes(cur.name)) enterApp('fade'); }
+/** Chamado ao abrir o app logado, ao voltar pro app e logo depois de entrar. */
+async function cloudRefresh({afterLogin=false}={}){
+  if(!cloud.user) return;
+  let remote; try{ remote=await cloud.pull(); lastPull=Date.now(); }
+  catch(e){ cloud.setStatus(navigator.onLine===false?'offline':'error',e.message||String(e)); if(afterLogin) toast('Entrei, mas não consegui baixar seu progresso agora. Tento de novo depois.'); cloudReady=true; return; }
+  const uid=cloud.user.id, first=st.cloudUid!==uid, R=remote.progress;
+  mergeActs(remote.acts);
+  const localH=hashOf(JSON.stringify(syncState())), localDirty=localH!==st.syncedHash;
+  if(!R||!R.state||!R.state.onboarded){                 // conta sem progresso ainda
+    st.cloudUid=uid; rawSave(); cloudReady=true;
+    if(st.onboarded){ await flushCloud(); if(afterLogin) toast('☁️ Pronto! Seu progresso agora fica salvo na nuvem.'); if(cur&&cur.name==='salvar') go('main',{tab:'home',welcome:true},'fade'); }
+    else if(afterLogin){ if(!st.profile.name) st.profile.name=cloud.firstName(); rawSave(); toast(`Conta conectada! Agora vamos montar o seu treino${cloud.firstName()?', '+cloud.firstName():''} 💪`); if(cur&&cur.name==='welcome') go('intro1'); }
+    return;
+  }
+  if(!st.onboarded){ adoptRemote(R); cloudReady=true; toast(`Bem-vindo de volta, ${esc(st.profile.name.trim()||cloud.firstName())}! 🎉`); rerender(); return; }
+  if(first){ cloudReady=false; return chooseSheet(R); }
+  const remoteChanged=R.updatedAt!==st.remoteAt;
+  cloudReady=true;
+  if(remoteChanged&&(!localDirty||(R.state.xp||0)>st.xp)){ adoptRemote(R); rerender(); toast('☁️ Progresso atualizado da nuvem'); }
+  else flushCloud();
+}
+function progressLine(o){ const xp=o.xp||0, n=Object.values(o.history||{}).reduce((a,h)=>a+(h.workouts||0),0); return `${esc(((o.profile||{}).name||'').trim()||'Sem nome')} · ${xp} XP · ${n} treino${n===1?'':'s'}`; }
+function chooseSheet(R){
+  let picked=false;
+  openSheet(`<div class="sh-head"><h2>Qual progresso você quer usar?</h2><p>Encontrei um progresso salvo nesta conta e outro neste celular.</p></div>
+    <div class="scroll"><div class="opts">
+      <button class="opt" data-c="cloud"><span class="em">${IC.cloudOk}</span><span class="t">Usar o da nuvem<span class="sub">${progressLine(R.state)}</span></span></button>
+      <button class="opt" data-c="local"><span class="em">📱</span><span class="t">Usar o deste celular<span class="sub">${progressLine(st)} · substitui o da nuvem</span></span></button>
+    </div><div style="height:8px"></div></div>`,
+    {onClose:()=>{ if(!picked){ cloud.signOut(); toast('Login cancelado. Nada foi alterado.'); } },
+     mount:L=>$$('[data-c]',L).forEach(b=>b.onclick=async()=>{ picked=true; SFX.ok(); const c=b.dataset.c; closeSheet();
+       st.cloudUid=cloud.user.id; cloudReady=true;
+       if(c==='cloud'){ adoptRemote(R); rerender(); toast('☁️ Progresso da nuvem carregado!'); }
+       else { st.syncedHash=''; rawSave(); await flushCloud(); toast('☁️ Progresso deste celular salvo na nuvem!'); if(cur&&cur.name==='salvar') go('main',{tab:'home',welcome:true},'fade'); }
+     })});
+}
+function loginWaitSheet(){
+  loginSheetOpen=true;
+  openSheet(`<div class="sh-head" style="text-align:center"><div class="axo-slot" style="height:150px" ${axo({id:'rex',anim:'wave'},'full')}></div><h2>Entrando com o Google…</h2><p>Escolha sua conta no navegador e volte pro AxoGo.</p></div>
+    <div class="foot"><button class="btn outline" data-x>Cancelar</button></div>`,
+    {onClose:()=>{ loginSheetOpen=false; cloud.busy=false; }, mount:L=>$('[data-x]',L).onclick=()=>closeSheet()});
+}
+async function startLogin(from){
+  loginFrom=from;
+  if(cloud.user){ toast('Você já está conectado ✅'); return; }
+  if(cloud.needsNewApk()){ openSheet(`<div class="sh-head"><h2>Atualize o app 📲</h2><p>Pra entrar com o Google, instale a versão nova do AxoGo (o mesmo link de antes). Seu progresso continua no celular.</p></div>
+      <div class="foot"><button class="btn" data-x>Entendi</button></div>`,{mount:L=>$('[data-x]',L).onclick=()=>closeSheet()}); return; }
+  if(!cloud.canLogin()){ openSheet(`<div class="sh-head"><h2>Login com Google</h2><p>O login funciona no app AxoGo instalado no celular. Nesta prévia o progresso fica salvo só neste navegador.</p></div>
+      <div class="foot"><button class="btn" data-x>Entendi</button></div>`,{mount:L=>$('[data-x]',L).onclick=()=>closeSheet()}); return; }
+  try{ await cloud.signIn(); if(NATIVE) loginWaitSheet(); }
+  catch(e){ toast('Não consegui abrir o login agora. Confira a internet.'); }
+}
+cloud.onChange(()=>{ if(cur&&cur.name==='main'&&tab==='me'){ const c=$('[data-acct]',cur.el); if(c){ c.outerHTML=accountCard(); bindAccount(cur.el); } } });
+window.addEventListener('axogo-login-failed',e=>{ if(loginSheetOpen) closeSheet(); toast('O login não deu certo. Tenta de novo?'); });
+function accountCard(){
+  if(cloud.user){ const av=cloud.avatar(), when=cloud.lastSync?new Date(cloud.lastSync).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}):'';
+    const stt={syncing:'Salvando…',ok:`Salvo na nuvem${when?' às '+when:''}`,offline:'Sem internet: salvo no celular, envio depois',error:'Não consegui salvar agora, tento de novo',idle:'Conectado',off:''}[cloud.status]||'Conectado';
+    return `<div class="card acct" data-acct><div class="acct-row">${av?`<img class="acct-av" src="${esc(av)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`:''}<div class="acct-t"><b>${esc(cloud.name())}</b><span>${esc(cloud.email())}</span></div>${IC.cloudOk}</div>
+      <p class="acct-st ${cloud.status}">${stt}</p><div class="acct-btns"><button class="btn outline sm" data-sync>Sincronizar agora</button><button class="btn outline sm" data-out>Sair</button></div>
+      <button class="btn link" style="color:var(--red);min-height:34px;font-size:13px" data-del>Apagar minha conta</button></div>`; }
+  if(!cloud.canLogin()&&!cloud.needsNewApk()) return `<div class="card acct" data-acct><b class="acct-h">☁️ Progresso na nuvem</b><p class="note" style="margin:4px 0 0">No app instalado você entra com o Google e o progresso fica salvo na nuvem.</p></div>`;
+  return `<div class="card acct" data-acct><b class="acct-h">☁️ Salve seu progresso na nuvem</b><p class="note" style="margin:4px 0 12px">Entre com o Google pra não perder a ofensiva se trocar de celular.</p><button class="btn google" data-g>${IC.google}Continuar com Google</button></div>`;
+}
+function bindAccount(root){
+  const g=$('[data-acct] [data-g]',root); if(g) g.onclick=()=>{ SFX.tap(); startLogin('perfil'); };
+  const sy=$('[data-acct] [data-sync]',root); if(sy) sy.onclick=async()=>{ SFX.tap(); await cloudRefresh(); if(cloud.status==='ok') toast('☁️ Tudo sincronizado!'); };
+  const out=$('[data-acct] [data-out]',root); if(out) out.onclick=()=>{ SFX.tap();
+    openSheet(`<div class="sh-head"><h2>Sair da conta?</h2><p>Seu progresso continua salvo na nuvem. Neste celular, o app volta pro início.</p></div>
+      <div class="foot"><button class="btn red" data-y>Sair</button><button class="btn link" data-n>Cancelar</button></div>`,
+      {mount:L=>{ $('[data-n]',L).onclick=()=>closeSheet();
+        $('[data-y]',L).onclick=async()=>{ const b=$('[data-y]',L); b.disabled=true; b.textContent='Salvando…'; await flushCloud();
+          const pending=st.acts.some(a=>!a.synced)||hashOf(JSON.stringify(syncState()))!==st.syncedHash;
+          if(pending&&!confirmLeave){ confirmLeave=true; b.disabled=false; b.textContent='Sair mesmo assim'; toast('Sem internet: as últimas mudanças ainda não foram pra nuvem.'); return; }
+          confirmLeave=false; closeSheet(true); await cloud.signOut(); wipeLocal(); go('welcome',{},'fade'); toast('Você saiu da conta 👋'); }; }}); };
+  const del=$('[data-acct] [data-del]',root); if(del) del.onclick=()=>{ SFX.tap();
+    openSheet(`<div class="sh-head"><h2>Apagar sua conta?</h2><p>Isso apaga a conta e todo o progresso salvo na nuvem (treinos, ofensiva e percursos). Não dá pra desfazer.</p></div>
+      <div class="foot"><button class="btn red" data-y>Apagar para sempre</button><button class="btn link" data-n>Cancelar</button></div>`,
+      {mount:L=>{ $('[data-n]',L).onclick=()=>closeSheet();
+        $('[data-y]',L).onclick=async()=>{ const b=$('[data-y]',L); b.disabled=true; b.textContent='Apagando…';
+          try{ await cloud.deleteAccount(); closeSheet(true); wipeLocal(); go('welcome',{},'fade'); toast('Conta apagada.'); }
+          catch(e){ b.disabled=false; b.textContent='Apagar para sempre'; toast('Não consegui apagar agora. Confira a internet.'); } }; }}); };
+}
+let confirmLeave=false;
+function wipeLocal(){ const snd=st.sound; try{ localStorage.removeItem(KEY); }catch(e){} st=DEF(); st.sound=snd; plan=null; lastProg=0; cloudReady=false; if(window.AxoGo) window.AxoGo.st=st; }
+
 function syncReminder(){ if(!NATIVE||!st.onboarded) return;
   const [h,m]=String(st.profile.reminder||'18:00').split(':').map(Number);
   nat('setReminder',h||0,m||0,st.profile.days.join(','),`Hora do treino, ${st.profile.name.trim()}! 🔥`,
@@ -1009,10 +1142,13 @@ window.AxoGoBack=()=>{
   return !['splash','welcome'].includes(cur.name);
 };
 
-function onVisible(){ if(!st.onboarded||!cur) return; if(GPS.on) GPS.pump();
+function onVisible(){ if(cloud.user&&cloudReady&&Date.now()-lastPull>60000&&!['treino','livre'].includes(cur?.name)) cloudRefresh(); else if(cloud.user) scheduleSync(300);
+  if(!st.onboarded||!cur) return; if(GPS.on) GPS.pump();
   if(cur.name==='main'){ const nw=syncDay(); if(nw.length) go('fuga',{ids:nw},'fade'); else { renderTopbar(); maybeApplyUpdate(); } } }
 document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') onVisible(); });
 window.addEventListener('axogo-resume',onVisible);
 if(st.onboarded) syncReminder();
 go('splash',{},'none');
-window.AxoGo={st,stage,go,plan:()=>plan,GPS};
+cloud.init((ev,user)=>{ if(user){ if(loginSheetOpen) closeSheet(); SFX.ok(); cloudRefresh({afterLogin:true}); } })
+  .then(()=>{ if(cloud.user) cloudRefresh(); });
+window.AxoGo={st,stage,go,plan:()=>plan,GPS,cloud,cloudRefresh,flushCloud};

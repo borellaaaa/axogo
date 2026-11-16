@@ -4,8 +4,8 @@ plugins {
 
 // Versão da "casca" nativa. Só muda quando o código Java/manifest muda;
 // telas, treinos e animações são atualizados remotamente (pasta /web).
-def shellCode = 1
-def shellName = '1.0.0'
+def shellCode = 2
+def shellName = '1.1.0'
 
 android {
     namespace 'com.axogo.app'

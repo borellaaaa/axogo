@@ -1,12 +1,12 @@
 {
- "version": 3,
+ "version": 4,
  "minShell": 1,
- "notes": "Correções gerais, animações novas e mapa da corrida",
+ "notes": "Login com Google e progresso salvo na nuvem",
  "files": [
   {
    "path": "app.js",
-   "sha256": "c7b87ef6888e690f33f932d6b2e0dd90047efacd352364b1993b78d40bd5b35a",
-   "size": 101419
+   "sha256": "b05a49eb629a1e6f23e7891d4357de50c062f40ba666e093478f7a8f2f504059",
+   "size": 115459
   },
   {
    "path": "axo3d.js",
@@ -14,9 +14,14 @@
    "size": 41438
   },
   {
+   "path": "cloud.js",
+   "sha256": "978e1cfbbb96e1ee5e8150a1d7fb0276dcb320ac5702afa1f7481a9b4b9ae658",
+   "size": 7315
+  },
+  {
    "path": "index.html",
-   "sha256": "c9dd1082cbaa2fe5d52da983f3346ce38474453f847059ec98f98fc7564e0aef",
-   "size": 476
+   "sha256": "d5533c8b864d31dbca994f8ae0f6e96f99041f34d6a7df35bcad422f7def6a27",
+   "size": 521
   },
   {
    "path": "map.js",
@@ -30,8 +35,8 @@
   },
   {
    "path": "styles.css",
-   "sha256": "f410428960ceb69fe097433260f52a79292b18924febddb0908f26936b70dded",
-   "size": 98592
+   "sha256": "53d938451a6be54d33f9e0f7c4102c45aef4f04b54de634bd674baac7c45fbae",
+   "size": 99640
   },
   {
    "path": "img/icon-192.png",
@@ -52,6 +57,11 @@
    "path": "vendor/BufferGeometryUtils.js",
    "sha256": "b9ea77ef3aacbf82d386c33311067e6ea4a3aac4190b32e001bdd11d063fb6ae",
    "size": 31784
+  },
+  {
+   "path": "vendor/supabase.js",
+   "sha256": "a867edbcfb029370aeec7223dd6180b560b621fbe3bc64c6584fb0369d1b7bce",
+   "size": 219856
   },
   {
    "path": "vendor/three.module.min.js",
