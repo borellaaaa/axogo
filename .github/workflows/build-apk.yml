@@ -1,0 +1,83 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Preparar assinatura
+        env:
+          AXO_KEYSTORE_B64: ${{ secrets.AXO_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$AXO_KEYSTORE_B64" ]; then
+            echo "$AXO_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/axogo.jks"
+            echo "AXO_KEYSTORE_FILE=$RUNNER_TEMP/axogo.jks" >> "$GITHUB_ENV"
+          else
+            echo "Sem keystore nos secrets: usando a chave de teste do repositório."
+          fi
+
+      - name: Compilar
+        env:
+          AXO_KEYSTORE_PASS: ${{ secrets.AXO_KEYSTORE_PASS }}
+        run: |
+          set -o pipefail
+          cd android
+          gradle --no-daemon --stacktrace assembleRelease 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Separar APK
+        run: |
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -n1)
+          cp "$APK" AxoGo.apk
+          ls -la AxoGo.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AxoGo-apk
+          path: AxoGo.apk
+
+      - name: Publicar na release "apk"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          WEBV=$(python3 -c "import json;print(json.load(open('web/manifest.json'))['version'])")
+          gh release view apk >/dev/null 2>&1 || gh release create apk --title "AxoGo (APK)" --notes "APK mais recente do AxoGo." --latest
+          gh release upload apk AxoGo.apk --clobber
+          gh release edit apk --notes "APK mais recente do AxoGo. Compilado em $(date -u +%Y-%m-%dT%H:%MZ), com o app web v$WEBV embutido. Depois de instalado, o app se atualiza sozinho."
+
+      - name: Guardar log do build
+        if: always()
+        run: |
+          mkdir -p /tmp/cilog && cd /tmp/cilog
+          tail -n 400 "$RUNNER_TEMP/build.log" > build.log 2>/dev/null || echo "sem log" > build.log
+          echo "status=${{ job.status }} run=${{ github.run_id }} sha=${{ github.sha }}" > status.txt
+          git init -q -b ci-logs .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add . && git commit -q -m "log do build ${{ github.run_id }}"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-logs

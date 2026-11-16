@@ -1,0 +1,57 @@
+{
+ "version": 1,
+ "minShell": 1,
+ "notes": "Primeira versão",
+ "files": [
+  {
+   "path": "app.js",
+   "sha256": "74b08f0746c32ec2e82c0d3e8db476e1ea0cb60cfaa865e5fab0ce9b14c02024",
+   "size": 88351
+  },
+  {
+   "path": "axo3d.js",
+   "sha256": "2d91185c452c4cfa7ae12cb0b78998e950ce92ce8426f65832b351b2cd032c6f",
+   "size": 38882
+  },
+  {
+   "path": "index.html",
+   "sha256": "7af08491527211b717f2d410f4459f99ef04b985dbc84473c58f5bac60ff3bcb",
+   "size": 507
+  },
+  {
+   "path": "plan.js",
+   "sha256": "8c6a4d92d8ce3b677247ea5e530f92f0cea57383768a4646ac6f2d15ec46d782",
+   "size": 16661
+  },
+  {
+   "path": "styles.css",
+   "sha256": "8875c649ee23c713567efd098a2d81e1fe0451a0d38737ae7df88ee8cd9d6c78",
+   "size": 93659
+  },
+  {
+   "path": "img/icon-192.png",
+   "sha256": "315ad67c853f1c1b2e527acf02bb4cb8463c1c3e5ebf40b786567b54ac14775b",
+   "size": 55024
+  },
+  {
+   "path": "img/logo.png",
+   "sha256": "7540dd6a8db0be1a8996c4dd645867ceb2e059feb97c7f886e471967e5115b77",
+   "size": 303147
+  },
+  {
+   "path": "img/turbo.png",
+   "sha256": "2b0f1ad006af4d2e44a115143360797a3a3fa3f233816a4c095584962406c138",
+   "size": 174666
+  },
+  {
+   "path": "vendor/BufferGeometryUtils.js",
+   "sha256": "b9ea77ef3aacbf82d386c33311067e6ea4a3aac4190b32e001bdd11d063fb6ae",
+   "size": 31784
+  },
+  {
+   "path": "vendor/three.module.min.js",
+   "sha256": "08fd7545d13d2c7fb65ab691530a802dafefd638596501854f267d0fb13c39e7",
+   "size": 691648
+  }
+ ]
+}

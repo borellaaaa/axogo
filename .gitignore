@@ -1,0 +1,10 @@
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.jks
+!android/keys/axogo-teste.jks
+*.keystore
+node_modules/
+*.png.tmp
+/_test/

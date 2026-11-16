@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AxoGo</string>
+    <string name="ch_track">Atividade em andamento</string>
+    <string name="ch_remind">Lembretes de treino</string>
+    <string name="track_title">AxoGo está registrando sua atividade</string>
+    <string name="track_text">Toque para voltar ao treino</string>
+</resources>

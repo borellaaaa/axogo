@@ -1,0 +1,71 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Versão da "casca" nativa. Só muda quando o código Java/manifest muda;
+// telas, treinos e animações são atualizados remotamente (pasta /web).
+def shellCode = 1
+def shellName = '1.0.0'
+
+android {
+    namespace 'com.axogo.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.axogo.app'
+        minSdk 24
+        targetSdk 34
+        versionCode shellCode
+        versionName shellName
+    }
+
+    signingConfigs {
+        release {
+            def ks = System.getenv('AXO_KEYSTORE_FILE')
+            if (ks) {
+                // chave privada (secrets do GitHub)
+                storeFile file(ks)
+                storePassword System.getenv('AXO_KEYSTORE_PASS')
+                keyAlias System.getenv('AXO_KEY_ALIAS') ?: 'axogo'
+                keyPassword System.getenv('AXO_KEYSTORE_PASS')
+            } else {
+                // chave pública de TESTE (veja android/keys/LEIA-ME.md)
+                storeFile rootProject.file('keys/axogo-teste.jks')
+                storePassword 'axogoteste'
+                keyAlias 'axogo'
+                keyPassword 'axogoteste'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs = ["${layout.buildDirectory.get().asFile}/webassets"]
+        }
+    }
+}
+
+// Copia o app web (pasta /web do repositório) pra dentro do APK como versão base offline.
+def copyWeb = tasks.register('copyWeb', Copy) {
+    from rootProject.file('../web')
+    into layout.buildDirectory.dir('webassets/web')
+}
+tasks.named('preBuild') { dependsOn copyWeb }
